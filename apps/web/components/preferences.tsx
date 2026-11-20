@@ -1,8 +1,9 @@
 'use client';
 
-import {Database,Radio,RefreshCw,ShieldCheck} from 'lucide-react';
+import {Database,Radio,RefreshCw} from 'lucide-react';
+import Link from 'next/link';
 import {useEffect,useState,type FormEvent} from 'react';
-import {collectorLabel,type MonitorStatus,type Settings,type Source,type SourceInfo} from '../../../packages/contracts/index';
+import {collectorLabel,type CollectionCoverage,type MonitorStatus,type Settings,type Source,type SourceInfo} from '../../../packages/contracts/index';
 import {label,request,timestamp} from './client';
 import {Mascot} from './mascot/mascot';
 import {Modal,type ProfileSettings,type Run} from './workspace';
@@ -13,6 +14,7 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
   const [oauthError,setOauthError]=useState('');
   const [hosted,setHosted]=useState<SourceInfo|null>(null);
   const [tuning,setTuning]=useState<SourceInfo|null>(null);
+  const [sharing,setSharing]=useState(false);
   const summaries={mock:'Seeded posts for testing your rules',x:'Your app-only credentials and spending limits',session:'Local OAuth consent for documented X read operations',hosted:'Shared collection for public topics you approve'};
   return <div className="stack">
     <div className="list-grid">{sources.map(s=><section key={s.id} className="panel source-card">
@@ -20,19 +22,25 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
       <p><span className="chip">{s.active?'Active · ':''}{s.status}</span></p>
       {s.error&&<p className="warning">{s.error}</p>}
       {s.gap&&<p className="subtle">{s.gap}</p>}
-      <ul className="plain-list">{s.capabilities.map(cap=> <li key={cap}><ShieldCheck size={15}/>{cap}</li>)}</ul>
+      <dl className="fields">{s.features?.map(feature=><div key={feature.label}><dt>{feature.label}{feature.detail&&<small>{feature.detail}</small>}</dt><dd>{feature.state}</dd></div>)}</dl>
       {s.id==='x'&&<>
         <p className="subtle">Set your app-only bearer via <code>npm run monitor -- credentials set</code>. Configure X request and resource budgets in Settings.</p>
         <dl className="fields"><div><dt>Requests reserved today</dt><dd>{s.requests}</dd></div><div><dt>Resources reserved today</dt><dd>{s.resources}</dd></div><div><dt>Projected requests per day</dt><dd>Up to {s.projectedRequests}</dd></div><div><dt>UTC budget resets</dt><dd>{timestamp(s.resetAt)}</dd></div></dl>
         <p className="subtle">Filtered Stream uses rules set in your developer app. Recent search also runs at the configured interval.</p>
       </>}
       {s.id==='session'&&<>
-        <p className="subtle">X controls login and verification in your browser. Access and refresh tokens stay in your OS vault. Website-only operations are unavailable. Your app's X budget applies.</p>
-        <dl className="fields"><div><dt>Account</dt><dd>{s.account?'@'+s.account:'—'}</dd></div><div><dt>Token expires</dt><dd>{timestamp(s.expiresAt)}</dd></div><div><dt>Personal signals</dt><dd>{s.syncing?'Paging · checkpoint saved':'Optional'}</dd></div></dl>
+        <p className="subtle">Official OAuth uses X’s consent screen and your app’s API budget. Access and refresh tokens stay in the OS vault.</p>
+        <dl className="fields"><div><dt>Account</dt><dd>{s.account?'@'+s.account:'—'}</dd></div><div><dt>OAuth token expires</dt><dd>{timestamp(s.expiresAt)}</dd></div></dl>
       </>}
+      {s.personalSync&&<dl className="fields">
+        <div><dt>Last successful signal sync</dt><dd>{timestamp(s.personalSync.lastSuccess)}</dd></div>
+        <div><dt>Signal coverage</dt><dd>{s.syncing?'Paging · checkpoint saved':s.personalSync.partial?'Partial or expired':s.personalSync.followingComplete?'Following sync complete':'Optional'}</dd></div>
+        <div><dt>Following and liked authors</dt><dd>{s.personalSync.following} following · {s.personalSync.liked} liked</dd></div>
+      </dl>}
       {s.id==='hosted'&&<>
         <p className="subtle">The VM receives approved public topics. Watchlist filters, X credentials, and personal ranking stay on this device.</p>
         {s.hosted&&<dl className="fields"><div><dt>Server</dt><dd>{s.hosted.origin}</dd></div><div><dt>Active subscriptions</dt><dd>{s.hosted.topics.join(', ')||'—'}</dd></div>
+          <div><dt>Collection provider</dt><dd>{s.hosted.provider?label(s.hosted.provider):'Unverified'}</dd></div>
           <div><dt>Delivery</dt><dd>{s.hosted.delivery==='ids'?'Post IDs and links only':s.hosted.delivery}</dd></div><div><dt>Latency estimate</dt><dd>{s.hosted.latencyMs===null?'—':s.hosted.latencyMs+' ms'}</dd></div></dl>}
       </>}
       <div className="actions">
@@ -41,7 +49,8 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
         {s.id!=='mock'&&(s.active||s.id==='hosted')&&s.configured&&<button className="button" disabled={busy} onClick={()=>void run(()=>request(`/sources/${s.id}/check`,'POST'),'Connection checked.')}><RefreshCw size={15}/> Check connection</button>}
         {s.id!=='mock'&&(s.configured||s.hosted)&&<button className="button" disabled={busy} onClick={()=>void run(()=>request(`/sources/${s.id}/disconnect`,'POST'),s.active?'Disconnected. Monitoring is paused.':'Disconnected.')}>Disconnect</button>}
         {s.id==='x'&&s.active&&<button className="button" disabled={busy} onClick={()=>{setOauthError('');setOauth('x');}}>Connect personal signals</button>}
-        {s.id==='session'&&<button className="button" disabled={busy} onClick={()=>{setOauthError('');setFollows(false);setOauth('session');}}>{s.configured?'Reconnect account':'Connect X account'}</button>}
+        {s.id==='session'&&<button className="button" disabled={busy} onClick={()=>{setOauthError('');setFollows(false);setOauth('session');}}>{s.configured?'Reconnect official OAuth':'Connect official OAuth'}</button>}
+        {s.id==='session'&&<button className="button" disabled={busy} onClick={()=>setSharing(true)}>Share selected X post</button>}
         {s.id==='hosted'&&<button className="button" disabled={busy} onClick={()=>setHosted(s)}>Configure hosted service</button>}
         {s.options&&<button className="button" disabled={busy} onClick={()=>setTuning(s)}>Collection settings</button>}
         {s.id==='x'&&s.configured&&<button className="button" disabled={busy} onClick={()=>void run(()=>request('/sources/x/signals','DELETE'),'Personal signals cleared.')}>Clear personal signals</button>}
@@ -51,9 +60,10 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
       <div className="panel-heading"><div><h2>Collection diagnostics</h2><p>Current source and local scheduling state</p></div></div>
       <Mascot mode={busy?'THINKING':monitor.error?'SAD':'IDLE'} reduced={reduced}/>
       <dl className="fields"><div><dt>Source</dt><dd>{collectorLabel[monitor.source]}</dd></div><div><dt>Last success</dt><dd>{timestamp(monitor.lastSuccess)}</dd></div><div><dt>Next attempt</dt><dd>{timestamp(monitor.nextDue)}</dd></div><div><dt>Polling interval</dt><dd>{monitor.intervalSeconds} seconds</dd></div></dl>
+      <CoverageFields coverage={monitor.coverage}/>
       {monitor.gap&&<p className="warning">{monitor.gap}</p>}
     </section>
-    {oauth&&<Modal title={oauth==='session'?'Connect Local X Account':'Connect personal signals'} close={()=>setOauth(null)}><p>Register <code>{typeof window!=='undefined'?location.origin:''}/api/v1/oauth/{oauth==='session'?'session/':''}callback</code> as the exact redirect URI for a public OAuth client in your developer app.</p>
+    {oauth&&<Modal title={oauth==='session'?'Connect with official X OAuth':'Connect personal signals'} close={()=>setOauth(null)}><p>Register <code>{typeof window!=='undefined'?location.origin:''}/api/v1/oauth/{oauth==='session'?'session/':''}callback</code> as the exact redirect URI for a public OAuth client in your developer app.</p>
       <div className="form-stack"><label>OAuth client ID<input value={client} onChange={e=>setClient(e.target.value)}/></label>
         <label className="check"><input type="checkbox" checked={follows} onChange={e=>setFollows(e.target.checked)}/> Accounts I follow</label>
         <label className="check"><input type="checkbox" checked={likes} onChange={e=>setLikes(e.target.checked)}/> Authors of posts I liked</label>
@@ -71,7 +81,36 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
       </div></Modal>}
     {hosted&&<HostedSetup source={hosted} busy={busy} close={()=>setHosted(null)} run={run}/>}
     {tuning?.options&&<CollectionOptions source={tuning} initial={tuning.options} busy={busy} close={()=>setTuning(null)} run={run}/>}
+    {sharing&&<SharePost busy={busy} close={()=>setSharing(false)} run={run}/>}
   </div>;
+}
+
+export function CoverageFields({coverage}:{coverage?:CollectionCoverage}) {
+  if(!coverage)return null;
+  return <dl className="fields">
+    <div><dt>Last attempt</dt><dd>{timestamp(coverage.lastAttempt)}</dd></div>
+    <div><dt>Latest attempt</dt><dd>{coverage.posts} posts · {coverage.pages} pages or deliveries</dd></div>
+    <div><dt>Oldest covered</dt><dd>{timestamp(coverage.oldest)}</dd></div>
+    <div><dt>Newest covered</dt><dd>{timestamp(coverage.newest)}</dd></div>
+    {coverage.budgetBlocked&&<div><dt>Collection budget</dt><dd>Budget prevented collection</dd></div>}
+  </dl>;
+}
+
+function SharePost({busy,close,run}:{busy:boolean;close:()=>void;run:Run}) {
+  const [url,setUrl]=useState(''),[excerpt,setExcerpt]=useState(''),[consent,setConsent]=useState(false),[postId,setPostId]=useState('');
+  return <Modal title="Share a selected X post" close={close}>
+    <p>From a post you’ve opened on X, copy the permalink and the text you choose to keep on this device.</p>
+    {postId?<Link className="button primary" href={`/feed/?post=${encodeURIComponent(postId)}&source=x`}>View saved post</Link>:
+      <form className="form-stack" onSubmit={e=>{e.preventDefault();void run(async()=>{
+        const post=await request<{id:string}>('/posts/share','POST',{url,excerpt,consent});
+        setPostId(post.id);
+      },'Selected post saved locally.');}}>
+        <label>X post permalink<input type="url" required maxLength={600} value={url} onChange={e=>setUrl(e.target.value)}/></label>
+        <label>Selected excerpt<textarea required maxLength={5000} value={excerpt} onChange={e=>setExcerpt(e.target.value)}/></label>
+        <label className="check"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/> I choose to store this excerpt locally.</label>
+        <button className="button primary" disabled={busy||!consent}>Save selected post</button>
+      </form>}
+  </Modal>;
 }
 
 function HostedSetup({source,busy,close,run}:{source:SourceInfo;busy:boolean;close:()=>void;run:Run}) {

@@ -3,7 +3,7 @@ import staticFiles from '@fastify/static';
 import { existsSync } from 'node:fs';
 import { randomBytes,timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { collectorSchema,defaults,feedbackSchema,kindSchema,namespaceSchema,normalize,preferencesSchema,settingsSchema,unknownMetrics,watchlist,type Candidate,type Settings } from '../../packages/contracts/index';
+import { collectorSchema,defaults,feedbackSchema,kindSchema,namespaceSchema,normalize,preferencesSchema,settingsSchema,unknownMetrics,watchlist,type Candidate,type Settings,type SourceCapability,type SourceInfo } from '../../packages/contracts/index';
 import {topicSchema} from '../../packages/collection-core/hosted';
 import {queryGroups} from '../../packages/collection-core/x-protocol';
 import { localTime,scorePost } from './rank';
@@ -11,6 +11,25 @@ import { hash,postSelect,type PostRow } from './storage';
 import type { Monitor } from './monitor';
 import type {XApi} from './x-api';
 import type {HostedClient} from './hosted-client';
+import {selectedPost,type WebsiteSession} from './website-session';
+
+function capabilities(id:SourceInfo['id'],access:SourceCapability['state'],lookup:SourceCapability['state'],stream:boolean,website:string,delivery?:string):SourceCapability[] {
+  if(id==='mock')return [{label:'Simulated search and engagement',state:'Available'},{label:'Simulated full previews',state:'Available'}];
+  if(id==='hosted')return [
+    {label:'Shared public-topic delivery',state:delivery==='simulated'||delivery==='ids'||delivery==='approved-public'?'Available':access},
+    {label:'VM authenticated website session',state:'Unsupported'},
+    {label:'Live redistribution',state:delivery==='approved-public'?'Limited':delivery==='ids'?'Limited':'Permission required',
+      detail:delivery==='approved-public'?'Operator-authorized topic delivery with local post links.':delivery==='ids'?'Post IDs and links only.':'Depends on the operator’s X authorization.'},
+  ];
+  return [
+    {label:id==='session'?'Official OAuth recent search':'App-only recent search',state:access,detail:'X credentials, endpoint entitlement and a configured budget are required.'},
+    {label:'Engagement lookup',state:lookup,detail:'Availability depends on the endpoint entitlement and returned fields.'},
+    {label:'Filtered Stream',state:id==='x'?(stream?'Available':'Unverified'):'Unsupported',detail:id==='x'?'Requires stream entitlement and developer-app rules.':undefined},
+    {label:'Live post previews',state:'Limited',detail:'Collection supports local matching and ranking. Use the original X link to read the post.'},
+    ...(id==='session'?[{label:'Authenticated website-session collection',state:'Permission required' as const,detail:website},
+      {label:'User-selected post sharing',state:'Available' as const,detail:'Save a permalink and selected excerpt locally.'}]:[]),
+  ];
+}
 
 const nonce=()=>randomBytes(32).toString('base64url');
 const sessionLife=2*60*60_000;
@@ -34,6 +53,7 @@ export function createApi(monitor:Monitor,options:{
   check?:()=>Promise<void>;
   official?:XApi;
   localAccount?:XApi;
+  website?:WebsiteSession;
   hosted?:HostedClient;
   erase:()=>Promise<void>;
 }) {
@@ -173,8 +193,13 @@ export function createApi(monitor:Monitor,options:{
     revision(req,previous.revision);
     const rule=Object.fromEntries(Object.entries(previous).filter(([key])=>!['id','revision','createdAt','updatedAt','matches'].includes(key)));
     const patch=z.record(z.string(),z.unknown()).parse(req.body);
-    const saved=store.saveList(watchlist.parse({...rule,...patch}),monitor.clock(),previous);
+    const saved=store.db.transaction(()=>{
+      const updated=store.saveList(watchlist.parse({...rule,...patch}),monitor.clock(),previous);
+      monitor.rerankStored(updated.id);
+      return updated;
+    })();
     listChanged();
+    monitor.signal('posts.changed');
     return saved;
   });
   api.delete('/api/v1/watchlists/:id',(req,res)=>{
@@ -200,15 +225,17 @@ export function createApi(monitor:Monitor,options:{
     if(query.source){checks.push('p.namespace=?');values.push(query.source);}
     if(collector){checks.push('EXISTS(SELECT 1 FROM post_sources o WHERE o.namespace=p.namespace AND o.post_id=p.id AND o.collector=?)');values.push(collector);}
     if (query.q.trim()) {
-      checks.push("(instr(p.id,?)>0 OR (p.namespace='mock' AND (instr(lower(p.text),lower(?))>0 OR instr(lower(a.handle),lower(?))>0)))");
-      values.push(query.q.trim(),query.q.trim(),query.q.trim());
+      checks.push("(instr(p.id,?)>0 OR (p.namespace='mock' AND (instr(lower(p.text),lower(?))>0 OR instr(lower(a.handle),lower(?))>0)) OR EXISTS(SELECT 1 FROM post_display d WHERE d.namespace=p.namespace AND d.post_id=p.id AND instr(lower(json_extract(d.metadata,'$.shared')),lower(?))>0))");
+      const term=query.q.trim(); values.push(term,term,term,term);
     }
     if (query.kind) {checks.push('p.kind=?');values.push(query.kind);}
     const matchChecks=['s.namespace=p.namespace','s.post_id=p.id'];
     if (query.listId) {matchChecks.push('s.list_id=?');values.push(query.listId);}
     if (query.priority) {matchChecks.push("json_extract(s.explanation,'$.classification')=?");values.push(query.priority);}
     const matches=`EXISTS(SELECT 1 FROM scores s WHERE ${matchChecks.join(' AND ')})`;
-    checks.push(collector==='hosted'&&!query.listId&&!query.priority?`(${matches} OR (p.namespace='x' AND p.text IS NULL))`:matches);
+    const supplemental=collector==='hosted'?"p.namespace='x' AND p.text IS NULL":collector==='session'?
+      "EXISTS(SELECT 1 FROM post_display d WHERE d.namespace=p.namespace AND d.post_id=p.id AND json_type(d.metadata,'$.shared')='text')":null;
+    checks.push(supplemental&&!query.listId&&!query.priority?`(${matches} OR (${supplemental}))`:matches);
     const sort=query.sort==='score'?'coalesce((SELECT max(score) FROM scores ss WHERE ss.namespace=p.namespace AND ss.post_id=p.id),-1)':'coalesce(p.created_at,p.first_seen_at)';
     if (query.cursor) {
       let cursor: {key:string;value:number;id:string};
@@ -219,6 +246,18 @@ export function createApi(monitor:Monitor,options:{
     const rows=store.all<PostRow & {sort_value:number}>(`${postSelect.replace('SELECT p.*,','SELECT p.*,'+sort+' AS sort_value,')} WHERE ${checks.join(' AND ')} ORDER BY sort_value DESC,p.id DESC LIMIT ?`,...values,query.limit+1);
     const page=rows.slice(0,query.limit),last=page.at(-1);
     return {items:page.map(row=>store.post(row)),cursor:rows.length>query.limit&&last?Buffer.from(JSON.stringify({key,value:last.sort_value,id:last.id})).toString('base64url'):null};
+  });
+  api.post('/api/v1/posts/share',(req,res)=>{
+    const now=monitor.clock(),post=selectedPost(req.body,now);
+    const row=store.db.transaction(()=>{
+      if(store.row('x',post.id))store.provenance(post);
+      else store.persist({...post,text:''},now);
+      store.run("INSERT INTO post_display VALUES ('x',?,?) ON CONFLICT(namespace,post_id) DO UPDATE SET metadata=json_set(post_display.metadata,'$.shared',json_extract(excluded.metadata,'$.shared'))",
+        post.id,JSON.stringify({shared:post.text}));
+      return store.row('x',post.id)!;
+    })();
+    monitor.signal('posts.changed');
+    return res.status(201).send(store.post(row));
   });
   api.get('/api/v1/posts/:namespace/:id',req=>{
     const {namespace,id}=itemParams.parse(req.params);
@@ -295,10 +334,12 @@ export function createApi(monitor:Monitor,options:{
         }
       }
       store.set('preferences',preferences);
+      if(JSON.stringify(previous.weights)!==JSON.stringify(preferences.weights)||JSON.stringify(previous.importantTerms)!==JSON.stringify(preferences.importantTerms))
+        monitor.rerankStored();
     })();
     store.set('next:'+store.active.id,monitor.clock()+preferences.intervalSeconds*1000);
     monitor.invalidate();
-    monitor.signal('settings.changed','overview.changed','source.changed');
+    monitor.signal('settings.changed','overview.changed','source.changed','posts.changed');
     return {...preferences,revision:store.revision('preferences')};
   });
   api.get('/api/v1/sources',()=>{
@@ -312,11 +353,28 @@ export function createApi(monitor:Monitor,options:{
     const groupCount=new Set(enabled.flatMap(queryGroups)).size;
     return store.sources.map(row=>{
       const x=row.id==='x'?options.official:row.id==='session'?options.localAccount:undefined;
-      const signals=store.value<{verified:string[];expires:number;syncing?:boolean}|null>(row.id+':signals',null);
+      const signals=store.value<{verified:string[];expires:number;syncing?:boolean;lastSuccess?:number;partial?:boolean;followingComplete?:boolean}|null>(row.id+':signals',null);
       const session=row.id==='session'?options.localAccount?.account:undefined;
+      const website=options.website?.state.status??'Permission required';
+      const access:SourceCapability['state']=!row.configured||['SESSION_EXPIRED','CREDENTIAL_REQUIRED','VERIFICATION_REQUIRED'].includes(row.error_code??'')?'Authentication required':
+        row.error_code==='ACCESS_DENIED'?'Permission required':(row.last_success_at||store.value(row.id+':search-verified',false))?'Available':'Unverified';
+      const features=capabilities(row.id,access,store.value<SourceCapability['state']>(row.id+':lookup-state',access==='Authentication required'?access:'Unverified'),
+        row.status==='Streaming',website,options.hosted?.diagnostics?.delivery);
+      let personalSync:SourceInfo['personalSync'];
+      if(x){
+        const following=store.count("SELECT count(*) n FROM account_relationships WHERE source_id=? AND account_id=? AND kind='following' AND expires_at>?",row.id,row.account_id,now);
+        const liked=store.count("SELECT count(*) n FROM account_relationships WHERE source_id=? AND account_id=? AND kind='liked-author' AND expires_at>?",row.id,row.account_id,now);
+        for(const [name,kind] of [['Following','following'],['Liked-author signals','liked-author']]){
+          features.push({label:name,state:signals&&signals.expires>now&&signals.verified.includes(kind)?'Available':'Permission required',
+            detail:'Requires separate OAuth consent and endpoint entitlement.'});
+        }
+        personalSync={lastSuccess:signals?.lastSuccess??null,following,liked,partial:!!signals&&(!!signals.partial||!!signals.syncing||(!!signals.verified.length&&signals.expires<=now)),
+          followingComplete:!!signals?.followingComplete&&signals.expires>now};
+      }
       return {id:row.id,active:!!row.active,configured:!!row.configured,
         status:session&&session.expiresAt<=now&&!session.renewable?'Session expired':row.status,error:row.error_code,
         gap:row.gap??(row.id==='x'?store.value<string|null>('x:stream-note',null):null),
+        features,coverage:store.coverage(row.id),personalSync,
         capabilities:[...(monitor.sources.get(row.id)?.capabilities??[]),
           ...(signals&&signals.expires>now?signals.verified.map(s=>s==='following'?'Following signals available':'Liked-author signals available'):[])],
         ...(x?{options:x.settings,syncing:signals?.syncing??false}:{}),

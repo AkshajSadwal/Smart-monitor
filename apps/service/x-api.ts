@@ -1,6 +1,6 @@
 import {createHash,randomBytes} from 'node:crypto';
 import {z} from 'zod';
-import {normalizeResponse,queryGroups,responseSchema,tweetId,userSchema,type FeedResponse} from '../../packages/collection-core/x-protocol';
+import {normalizeResponse,queryGroups,responseSchema,searchResponseSchema,tweetId,userSchema,type FeedResponse} from '../../packages/collection-core/x-protocol';
 export {queryGroups} from '../../packages/collection-core/x-protocol';
 import {type Candidate,type Watchlist} from '../../packages/contracts/index';
 import {ApiError,paid} from './api';
@@ -15,11 +15,12 @@ const shortTime=(epoch:number)=>new Date(Math.floor(epoch/second)*second).toISOS
 const tweetFields='author_id,created_at,lang,public_metrics,referenced_tweets,edit_history_tweet_ids,note_tweet,entities';
 
 type Receive=typeof fetch;
-type Cursor={completed:number|null;start:number;end:number;token?:string;pending:boolean;initial:boolean;oldEnd:number};
+type Cursor={completed:number|null;start:number;end:number;token?:string;pending:boolean;initial:boolean;oldEnd:number;partial?:boolean};
 type SignalConsent={clientId:string;following:boolean;likes:boolean};
 type Pending=SignalConsent & {refresh:boolean;verifier:string;expires:number;generation:number;redirect:string};
 type OAuthSettings=SignalConsent & {accountId:string;scope:string;next:number};
 type SessionGrant=SignalConsent & {accountId:string;username:string|null;expiresAt:number;renewable:boolean};
+type SignalProgress={token?:string;complete:boolean;begun:number;retry?:boolean};
 export const collectorOptions=z.strictObject({
   pages:z.number().int().min(1).max(12),pageSize:z.number().int().min(10).max(100),
   recoveryHours:z.number().int().min(1).max(168),stream:z.boolean(),
@@ -109,6 +110,7 @@ export class XApi implements LiveCollector {
       response=await this.transport(`https://api.x.com/2/${path}?${parameters}`,{headers:{Authorization:'Bearer '+token},signal:AbortSignal.any([signal,AbortSignal.timeout(20_000)]),redirect:'error'});
     } catch {throw new XIssue('NETWORK');}
     signal.throwIfAborted();
+    if(!response.ok&&response.status!==403)await response.body?.cancel().catch(()=>{});
     if (response.status===429) {
       const at=resetTime(response.headers,now,minute)+Math.floor(Math.random()*2000);
       this.store.set(`${this.id}:rate-at`,at);
@@ -144,6 +146,10 @@ export class XApi implements LiveCollector {
     const attempt=this.store.value(`${this.id}:attempt`,0)+1;
     this.store.set(`${this.id}:attempt`,attempt);
     const terminal=['ACCESS_DENIED','CREDITS_REQUIRED','CREDENTIAL_REQUIRED','SESSION_EXPIRED','VERIFICATION_REQUIRED','PAGE_INVALID'].includes(issue.code);
+    if(issue.code==='BUDGET_EXHAUSTED'||issue.code==='CREDITS_REQUIRED'){
+      this.store.changeCoverage(this.id,{budgetBlocked:true});
+      this.store.run('UPDATE data_sources SET gap=? WHERE id=?','Collection may be incomplete because the request or resource budget stopped retrieval.',this.id);
+    }
     this.store.set(`${this.id}:hold`,terminal);
     this.store.set(`next:${this.id}`,terminal?Number.MAX_SAFE_INTEGER:issue.retryAt??now+Math.min(30*minute,30*second*2**Math.min(10,attempt-1))+Math.floor(Math.random()*3000));
   }
@@ -153,12 +159,13 @@ export class XApi implements LiveCollector {
         this.store.set(`next:${this.id}`,Number.MAX_SAFE_INTEGER);
         return false;
       }
+      this.store.changeCoverage(this.id,{lastAttempt:now,pages:0,posts:0,budgetBlocked:false});
       const {pages,pageSize,recoveryHours}=this.settings;
       const byQuery=new Map<string,string[]>();
       let unsupported=0;
       for(const list of lists) {
         const queries=queryGroups(list);
-        if(!queries.length)unsupported++;
+        if(!queries.length||list.mode==='ANY'&&list.terms.some(term=>term.direction==='include'&&!queryGroups({...list,terms:[term]}).length))unsupported++;
         for(const query of queries) {
           const keys=byQuery.get(query)??[];
           keys.push(`cursor:${this.id}:${list.id}:${list.revision}:${hash(query).slice(0,12)}`);
@@ -181,19 +188,20 @@ export class XApi implements LiveCollector {
           const old=this.store.value<Cursor|null>(key,null)??legacy.map(k=>this.store.value<Cursor|null>(k,null)).find(Boolean);
           if (old?.completed!==null && old?.completed!==undefined && old.completed>=end && !old.pending) continue;
           const initial=!old||old.completed===null;
-          const previous=old?.completed??end-15*minute;
+          const previous=old?.completed??old?.start??end-15*minute;
           const earliest=end-recoveryHours*hour;
           if(end-previous>recoveryHours*hour||(old?.pending&&old.start<earliest))olderGap=true;
           let cursor:Cursor=old?.pending&&old.start>=earliest?old:{completed:old?.completed??null,start:Math.max(previous,earliest),end,initial,oldEnd:previous,pending:true};
           if(cursor.start>=cursor.end)continue;
+          commit([],true,key,cursor);
           for(let page=0;page<pages;page++) {
             const params=this.fields({query,start_time:shortTime(cursor.start),end_time:shortTime(cursor.end),max_results:String(pageSize),sort_order:'recency'});
             if(cursor.token) params.set('next_token',cursor.token);
             let body:FeedResponse;
-            try {body=responseSchema.parse(await this.get('tweets/search/recent',params,now,pageSize*2,signal));}
+            try {body=searchResponseSchema.parse(await this.get('tweets/search/recent',params,now,pageSize*2,signal));}
             catch(error) {
               if(error instanceof XIssue&&error.code==='PAGE_INVALID'&&cursor.token) {
-                cursor={...cursor,token:undefined};
+                cursor={...cursor,token:undefined,partial:false};
                 commit([],cursor.initial,key,cursor);
                 partial=true;
                 break;
@@ -201,16 +209,28 @@ export class XApi implements LiveCollector {
               throw error;
             }
             const posts=normalizeResponse(body,now,`search:${cursor.start}:${cursor.end}`);
-            partial ||= !!body.errors?.length||posts.length!==(body.data?.length??0);
+            if(signal.aborted)return false;
+            const windowPartial=!!cursor.partial||!!body.errors?.length||posts.length!==(body.data?.length??0);
+            partial ||= windowPartial;
             const historical=cursor.initial||cursor.end-cursor.oldEnd>2*this.store.settings.intervalSeconds*second;
             const next=body.meta?.next_token;
             if(next&&next===cursor.token) {
-              commit(posts,historical,key,{...cursor,token:undefined});
+              this.store.db.transaction(()=>{
+                commit(posts,historical,key,{...cursor,token:undefined,partial:false});
+                const coverage=this.store.coverage(this.id);
+                this.store.changeCoverage(this.id,{pages:coverage.pages+1,posts:coverage.posts+posts.length});
+              })();
+              useful=true;
               partial=true;
               break;
             }
-            cursor={...cursor,token:next,pending:!!next,completed:next?cursor.completed:cursor.end};
-            commit(posts,historical,key,cursor);
+            cursor={...cursor,token:next,pending:!!next,completed:next?cursor.completed:cursor.end,partial:windowPartial};
+            this.store.db.transaction(()=>{
+              commit(posts,historical,key,cursor);
+              const coverage=this.store.coverage(this.id);
+              this.store.changeCoverage(this.id,{pages:coverage.pages+1,posts:coverage.posts+posts.length,
+                ...(!cursor.pending&&!windowPartial?{oldest:Math.min(coverage.oldest??Infinity,cursor.start),newest:Math.max(coverage.newest??0,cursor.end)}:{})});
+            })();
             useful=true;
             if(!cursor.token)break;
             if(page===pages-1)capped=true;
@@ -225,7 +245,11 @@ export class XApi implements LiveCollector {
         }
         return useful;
       } catch(error) {
-        if(!signal.aborted)this.failure(error,now);
+        if(!signal.aborted){
+          if(!(error instanceof XIssue&&['BUDGET_EXHAUSTED','CREDITS_REQUIRED'].includes(error.code)))
+            this.store.run('UPDATE data_sources SET gap=? WHERE id=?','Collection stopped before the search window finished. The checkpoint was kept.',this.id);
+          this.failure(error,now);
+        }
         return false;
       }
     });
@@ -238,12 +262,19 @@ export class XApi implements LiveCollector {
         if(!ids.length)return {posts:[],removed:[]};
         const body=responseSchema.parse(await this.get('tweets',this.fields({ids:ids.join(',')}),now,ids.length*2,signal));
         const normalized=normalizeResponse(body,now,'lookup:'+now);
+        this.store.set(`${this.id}:lookup-state`,'Available');
         const removed=(body.errors??[]).flatMap(e=>{
           const id=e.resource_id??e.value;
           return id&&ids.includes(id)&&e.type?.endsWith('/resource-not-found')?[id]:[];
         });
         return {posts:normalized,removed};
-      } catch(error) {if(!signal.aborted)this.failure(error,now);return {posts:[],removed:[]};}
+      } catch(error) {
+        if(!signal.aborted){
+          const issue=error instanceof XIssue?error.code:'UPSTREAM_INVALID';
+          this.store.set(`${this.id}:lookup-state`,issue==='ACCESS_DENIED'?'Permission required':issue==='CREDENTIAL_REQUIRED'||issue==='SESSION_EXPIRED'?'Authentication required':'Unverified');
+        }
+        return {posts:[],removed:[]};
+      }
     });
   }
   async stream(_lists:Watchlist[],signal:AbortSignal,commit:Parameters<LiveCollector['collect']>[3]) {
@@ -310,13 +341,25 @@ export class XApi implements LiveCollector {
     if(!query)throw new ApiError(409,'NO_QUERY','Create an enabled watchlist with a supported query first.');
     const now=Date.now();
     try {
-      await this.serialize(async()=>responseSchema.parse(await this.get('tweets/search/recent',this.fields({query,max_results:'10'}),now,20,AbortSignal.timeout(22_000))));
-      this.store.run(`UPDATE data_sources SET status='Polling verified',error_code=NULL,last_success_at=? WHERE id='${this.id}'`,now);
+      await this.serialize(async()=>searchResponseSchema.parse(await this.get('tweets/search/recent',this.fields({query,max_results:'10'}),now,20,AbortSignal.timeout(22_000))));
+      this.store.run(`UPDATE data_sources SET status='Search verified',error_code=NULL WHERE id='${this.id}'`);
+      this.store.set(`${this.id}:search-verified`,true);
       this.store.set(`${this.id}:hold`,false);
       this.store.set(`next:${this.id}`,now+this.store.settings.intervalSeconds*1000);
     } catch(error) {
       this.failure(error,now);
-      throw new ApiError(503,'X_CHECK_FAILED','The X check failed. Review collection diagnostics.');
+      const issue=error instanceof XIssue?error.code:'UPSTREAM_INVALID';
+      const messages:Partial<Record<Issue,string>>={
+        ACCESS_DENIED:'X denied access to recent search. Check the app’s endpoint entitlement and OAuth scopes.',
+        CREDENTIAL_REQUIRED:'X rejected the credential or the OS vault could not supply it.',
+        SESSION_EXPIRED:'The OAuth authorization expired. Reconnect from Data sources.',
+        VERIFICATION_REQUIRED:'X requires account verification before allowing this request.',
+        CREDITS_REQUIRED:'X reports that this project has insufficient credits.',
+        BUDGET_EXHAUSTED:'The configured daily budget blocked the connection check.',
+        RATE_LIMIT:'X rate limited this credential. Wait for the reset before retrying.',
+        PAGE_INVALID:'X rejected the current watchlist query.',
+      };
+      throw new ApiError(503,issue,messages[issue]??'X is unavailable or returned an invalid response. Review collection diagnostics.');
     } finally {this.changed();}
   }
   authorize(input:unknown,origin:string) {
@@ -361,7 +404,7 @@ export class XApi implements LiveCollector {
           this.store.run("UPDATE data_sources SET configured=1,status='Connected',error_code=NULL WHERE id='session'");
           this.store.set('session:hold',false);
           this.store.set('next:session',now);
-          if(keep)this.store.set('session:oauth',{clientId:grant.clientId,following:grant.following,likes:grant.likes,accountId,scope,next:now+(this.syncPending(accountId)?minute:day)} satisfies OAuthSettings);
+          if(grant.following||grant.likes||keep)this.store.set('session:oauth',{clientId:grant.clientId,following:grant.following,likes:grant.likes,accountId,scope,next:now+(this.syncPending(accountId)?minute:day)} satisfies OAuthSettings);
           else this.store.run("DELETE FROM settings WHERE key='session:oauth'");
           return;
         }
@@ -380,15 +423,16 @@ export class XApi implements LiveCollector {
   private async syncSignals(consent:SignalConsent,scope:string,access:string,now:number,signal:AbortSignal,valid:()=>unknown,expected?:string) {
     const own=z.object({data:userSchema}).parse(await this.get('users/me',new URLSearchParams(),now,1,signal,access)).data;
     if(expected&&own.id!==expected)throw new XIssue('ACCESS_DENIED');
-    const scopes=scope.split(/\s+/), missingSignals:string[]=[];
-    const sets:{kind:string;authors:Set<string>;complete:boolean;next?:string;continued:boolean}[]=[];
+    const scopes=scope.split(/\s+/), revoked=new Set<string>(),missingSignals:string[]=[];
+    const sets:{kind:string;authors:Set<string>;progress:SignalProgress;success:boolean}[]=[];
     for(const flag of [{enabled:consent.following,scope:'follows.read',path:'following',kind:'following'},{enabled:consent.likes,scope:'like.read',path:'liked_tweets',kind:'liked-author'}]){
       if(!flag.enabled)continue;
-      if(!scopes.includes(flag.scope)){missingSignals.push(flag.kind);continue;}
+      if(!scopes.includes(flag.scope)){revoked.add(flag.kind);missingSignals.push(flag.kind);continue;}
       const authors=new Set<string>();
       const cursorKey=`${this.id}:sync:${own.id}:${flag.kind}`;
-      const saved=expected?this.store.value<{token?:string;complete?:boolean}|null>(cursorKey,null):null;
-      if(saved?.complete&&this.syncPending(own.id)){sets.push({kind:flag.kind,authors,complete:true,continued:true});continue;}
+      const saved=expected?this.store.value<SignalProgress|null>(cursorKey,null):null;
+      if(saved?.complete&&this.syncPending(own.id)&&saved.begun>now-day){sets.push({kind:flag.kind,authors,progress:saved,success:false});continue;}
+      const begun=saved&&!saved.complete?saved.begun??now:now;
       let next=saved?.token,complete=false,success=false;
       for(let page=0;page<2;page++){
         if(!valid())throw new XIssue('ACCESS_DENIED');
@@ -410,10 +454,14 @@ export class XApi implements LiveCollector {
           if(followingCursor&&followingCursor===next){next=undefined;break;}
           next=followingCursor;
           if(!next){complete=!result.errors?.length;break;}
-        } catch {break;}
+        } catch(error) {
+          if(error instanceof XIssue&&['ACCESS_DENIED','CREDENTIAL_REQUIRED','SESSION_EXPIRED'].includes(error.code))revoked.add(flag.kind);
+          if(next&&error instanceof XIssue&&error.code==='PAGE_INVALID')next=undefined;
+          break;
+        }
       }
-      if(success)sets.push({kind:flag.kind,authors,complete,next,continued:!!saved?.token});
-      else missingSignals.push(flag.kind);
+      if(!revoked.has(flag.kind))sets.push({kind:flag.kind,authors,progress:{token:next,complete,begun,retry:!complete&&!next},success});
+      if(!complete&&!next)missingSignals.push(flag.kind);
     }
     if(!valid())throw new XIssue('ACCESS_DENIED');
     this.store.db.transaction(()=>{
@@ -421,18 +469,30 @@ export class XApi implements LiveCollector {
         this.store.run('DELETE FROM account_relationships WHERE source_id=?',this.id);
         this.store.run('DELETE FROM settings WHERE key LIKE ?',`${this.id}:sync:%`);
       }
-      for(const {kind,authors,complete,next,continued} of sets){
-        if(!continued)this.store.run('DELETE FROM account_relationships WHERE source_id=? AND account_id=? AND kind=?',this.id,own.id,kind);
-        for(const author of authors)this.store.run('INSERT INTO account_relationships VALUES (?,?,?,?,1,?) ON CONFLICT(source_id,account_id,author_id,kind) DO UPDATE SET expires_at=excluded.expires_at',this.id,own.id,author,kind,now+day);
-        this.store.set(`${this.id}:sync:${own.id}:${kind}`,{token:next,complete});
+      for(const kind of revoked){
+        this.store.run('DELETE FROM account_relationships WHERE source_id=? AND account_id=? AND kind=?',this.id,own.id,kind);
+        this.store.run('DELETE FROM settings WHERE key=?',`${this.id}:sync:${own.id}:${kind}`);
       }
+      for(const {kind,authors,progress} of sets){
+        for(const author of authors)this.store.run('INSERT INTO account_relationships VALUES (?,?,?,?,1,?) ON CONFLICT(source_id,account_id,author_id,kind) DO UPDATE SET expires_at=excluded.expires_at',this.id,own.id,author,kind,now+day);
+        if(progress.complete)this.store.run('DELETE FROM account_relationships WHERE source_id=? AND account_id=? AND kind=? AND expires_at<?',this.id,own.id,kind,progress.begun+day);
+        this.store.set(`${this.id}:sync:${own.id}:${kind}`,progress);
+      }
+      const prior=expected?this.store.value<{lastSuccess?:number;expires:number;verified:string[]}|null>(`${this.id}:signals`,null):null;
+      const success=sets.some(result=>result.success);
+      const verified=sets.filter(result=>result.success||prior?.verified.includes(result.kind)&&prior.expires>now).map(result=>result.kind);
       this.store.run(`UPDATE data_sources SET account_id=?,gap=coalesce(?,gap) WHERE id='${this.id}'`,own.id,missingSignals.length?`Optional signals unavailable: ${missingSignals.join(', ')}.`:null);
-      this.store.set(`${this.id}:signals`,{verified:sets.map(r=>r.kind),syncing:this.syncPending(own.id),followingComplete:sets.some(r=>r.kind==='following'&&r.complete),accountId:own.id,expires:now+day});
+      this.store.set(`${this.id}:signals`,{verified,syncing:this.syncPending(own.id),partial:!!missingSignals.length,
+        followingComplete:sets.some(r=>r.kind==='following'&&r.progress.complete),accountId:own.id,
+        lastSuccess:success?now:prior?.lastSuccess??null,expires:success?now+day:prior?.expires??now});
     })();
     return own;
   }
   private syncPending(account:string) {
-    return ['following','liked-author'].some(kind=>!!this.store.value<{token?:string}|null>(`${this.id}:sync:${account}:${kind}`,null)?.token);
+    return ['following','liked-author'].some(kind=>{
+      const saved=this.store.value<SignalProgress|null>(`${this.id}:sync:${account}:${kind}`,null);
+      return !!(saved?.token||saved?.retry);
+    });
   }
   private async sessionToken(now:number,signal:AbortSignal) {
     const grant=this.account;
@@ -456,6 +516,8 @@ export class XApi implements LiveCollector {
     if(generation!==this.row.generation)throw new XIssue('CREDENTIAL_REQUIRED');
     if(token.refresh_token)await this.vault.set('oauth-refresh',token.refresh_token);
     await this.vault.set('access',token.access_token);
+    const config=this.store.value<OAuthSettings|null>('session:oauth',null);
+    if(config&&token.scope!==undefined)this.store.set('session:oauth',{...config,scope:token.scope});
     this.store.set('session:grant',{...grant,expiresAt:now+(token.expires_in??7200)*1000});
     return token.access_token;
   }
@@ -469,8 +531,9 @@ export class XApi implements LiveCollector {
         if(this.id==='session'){
           const access=await this.sessionToken(now,signal);
           if(!access||!valid())return;
-          await this.syncSignals(config,config.scope,access,now,signal,valid,config.accountId);
-          if(valid())this.store.set('session:oauth',{...config,next:now+(this.syncPending(config.accountId)?minute:day)});
+          const current=this.store.value<OAuthSettings>('session:oauth',config);
+          await this.syncSignals(current,current.scope,access,now,signal,valid,current.accountId);
+          if(valid())this.store.set('session:oauth',{...current,next:now+(this.syncPending(current.accountId)?minute:day)});
           return;
         }
         const previous=await this.vault.get('oauth-refresh');
@@ -480,7 +543,7 @@ export class XApi implements LiveCollector {
         if(!valid())return;
         if(response.status===400||response.status===401){
           this.store.run(`DELETE FROM account_relationships WHERE source_id='${this.id}'`);
-          this.store.run(`DELETE FROM settings WHERE key IN ('${this.id}:signals','${this.id}:oauth')`);
+          this.store.run('DELETE FROM settings WHERE key IN (?,?) OR key LIKE ?',`${this.id}:signals`,`${this.id}:oauth`,`${this.id}:sync:%`);
           this.store.run(`UPDATE data_sources SET account_id=NULL,gap='Personal signal consent expired. Reconnect from Data sources.' WHERE id='${this.id}'`);
           await this.vault.remove('oauth-refresh');
           return;
@@ -492,8 +555,17 @@ export class XApi implements LiveCollector {
         const scope=token.scope??config.scope;
         await this.syncSignals(config,scope,token.access_token,now,signal,valid,config.accountId);
         if(valid())this.store.set(`${this.id}:oauth`,{...config,scope,next:now+(this.syncPending(config.accountId)?minute:day)});
-      } catch {
-        if(valid()&&this.store.value(`${this.id}:oauth`,null))this.store.set(`${this.id}:oauth`,{...config,next:now+hour});
+      } catch(error) {
+        if(!valid())return;
+        if(error instanceof XIssue&&['ACCESS_DENIED','CREDENTIAL_REQUIRED','SESSION_EXPIRED'].includes(error.code)){
+          this.store.run('DELETE FROM account_relationships WHERE source_id=?',this.id);
+          this.store.run('DELETE FROM settings WHERE key IN (?,?) OR key LIKE ?',`${this.id}:signals`,`${this.id}:oauth`,`${this.id}:sync:%`);
+          this.store.run('UPDATE data_sources SET gap=? WHERE id=?','Personal authorization expired or was revoked. Reconnect from Data sources.',this.id);
+          if(this.id==='session')this.failure(error,now);
+        }else{
+          const current=this.store.value<OAuthSettings|null>(`${this.id}:oauth`,null);
+          if(current)this.store.set(`${this.id}:oauth`,{...current,next:error instanceof XIssue&&error.retryAt?error.retryAt:now+hour});
+        }
       }
     });
   }
@@ -504,7 +576,7 @@ export class XApi implements LiveCollector {
     this.store.db.transaction(()=>{
       this.store.run(`UPDATE data_sources SET configured=1,status='Configured · unverified',generation=generation+1,error_code=NULL,account_id=NULL,vault_ref='bearer' WHERE id='${this.id}'`);
       this.store.run(`DELETE FROM account_relationships WHERE source_id='${this.id}'`);
-      this.store.run(`DELETE FROM settings WHERE key LIKE 'cursor:${this.id}:%' OR key IN ('${this.id}:signals','${this.id}:oauth','${this.id}:rate-at','${this.id}:hold')`);
+      this.store.run(`DELETE FROM settings WHERE key LIKE 'cursor:${this.id}:%' OR key LIKE '${this.id}:sync:%' OR key IN ('${this.id}:signals','${this.id}:oauth','${this.id}:rate-at','${this.id}:hold','${this.id}:lookup-state','${this.id}:search-verified')`);
       this.store.set(`next:${this.id}`,Date.now());
     })();
     this.pending.clear();this.changed();
@@ -514,7 +586,7 @@ export class XApi implements LiveCollector {
     this.store.db.transaction(()=>{
       this.store.run(`UPDATE data_sources SET account_id=NULL,generation=generation+1 WHERE id='${this.id}'`);
       this.store.run(`DELETE FROM account_relationships WHERE source_id='${this.id}'`);
-      this.store.run(`DELETE FROM settings WHERE key='${this.id}:signals'`);
+      this.store.run('DELETE FROM settings WHERE key=? OR key LIKE ?',`${this.id}:signals`,`${this.id}:sync:%`);
       if(this.store.value(`${this.id}:oauth`,null))this.store.set(`${this.id}:oauth:remove`,true);
       this.store.run(`DELETE FROM settings WHERE key='${this.id}:oauth'`);
     })();
@@ -535,7 +607,7 @@ export class XApi implements LiveCollector {
       }
       this.store.run(`DELETE FROM account_relationships WHERE source_id='${this.id}'`);
       this.store.run(`DELETE FROM monitoring_jobs WHERE collector='${this.id}'`);
-      this.store.run(`DELETE FROM settings WHERE key LIKE 'cursor:${this.id}:%' OR key IN ('${this.id}:signals','${this.id}:oauth','${this.id}:rate-at','${this.id}:hold')`);
+      this.store.run(`DELETE FROM settings WHERE key LIKE 'cursor:${this.id}:%' OR key IN ('${this.id}:signals','${this.id}:oauth','${this.id}:rate-at','${this.id}:hold','${this.id}:lookup-state','${this.id}:search-verified')`);
       this.store.run('DELETE FROM settings WHERE key=? OR key LIKE ?',`${this.id}:grant`,`${this.id}:sync:%`);
     })();
     if(!this.store.sources.find(s=>s.id===this.id)?.vault_ref) {this.changed();return;}

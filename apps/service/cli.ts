@@ -10,6 +10,7 @@ import {ApiError,createApi} from './api';
 import {Store,hash} from './storage';
 import {Monitor} from './monitor';
 import {OSVault,XApi} from './x-api';
+import {WebsiteSession} from './website-session';
 import {HostedClient} from './hosted-client';
 import {desktopBridge} from './desktop-ipc';
 
@@ -79,6 +80,7 @@ async function serve() {
   };
   const x:XApi=new XApi(store,new OSVault(profile),fetch,collectionChanged);
   const localAccount:XApi=new XApi(store,new OSVault(profile+':local-account'),fetch,collectionChanged,'session');
+  const website=new WebsiteSession(store,new OSVault(profile+':website'));
   const hosted:HostedClient=new HostedClient(store,new OSVault(profile+':hosted'),undefined,()=>{
     monitor.wake();
     monitor.signal('source.changed');
@@ -109,6 +111,7 @@ async function serve() {
     try {
       await x.disconnect();
       await localAccount.disconnect();
+      await website.disconnect();
       await hosted.disconnect();
     }
     catch(error) {monitor.start();throw error;}
@@ -123,7 +126,7 @@ async function serve() {
     store.db.pragma('wal_checkpoint(TRUNCATE)');
     monitor.start();
   };
-  const service=createApi(monitor,{profile,webRoot:root,controlToken:token,stop,erase,official:x,localAccount,hosted,
+  const service=createApi(monitor,{profile,webRoot:root,controlToken:token,stop,erase,official:x,localAccount,website,hosted,
     credential:value=>{monitor.invalidate();return x.credential(value);},
     disconnect:()=>{monitor.invalidate();return x.disconnect();},authorize:(input,origin)=>x.authorize(input,origin),
     clearSignals:()=>{monitor.invalidate();return x.clearSignals();},

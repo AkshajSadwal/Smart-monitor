@@ -36,7 +36,7 @@ The profile contains `monitor.sqlite`, runtime coordination data and the redacte
 
 The official adapter polls recent search, reserves resources before requests, and reports coverage gaps. You can configure page limits and opt in to Filtered Stream using the rules on your X developer app. The same local ranker handles both transports. Live X previews use match summaries, source metadata and X links. [Collection feasibility](docs/03-collection.md)
 
-**Local X Account** uses a documented OAuth user session kept in the OS vault. **Hosted Monitoring** accepts an operator-issued token and subscribes to public topics you explicitly approve. It preserves local ranking and notification decisions. See the [multi-source setup and VM guide](docs/09-multi-source.md) for session configuration, permission gates, HTTPS deployment and tests.
+**Local X Account** uses official OAuth and keeps credentials in the OS vault. Authenticated website-session collection requires separate X permission. You can save an excerpt you select in your own browser using **Share selected X post** in Data sources. **Hosted Monitoring** accepts an operator-issued token and subscribes to public topics you explicitly approve, with local ranking and notifications. See the [multi-source setup and VM guide](docs/09-multi-source.md) and the [manual acceptance tests](docs/10-manual-testing.md).
 
 ## Build desktop packages
 

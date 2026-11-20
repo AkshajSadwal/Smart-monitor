@@ -22,5 +22,6 @@ export const hostedEvent=z.strictObject({
 });
 export const hostedStatus=z.object({
   delivery:deliverySchema,serverTime:z.number().int().nonnegative(),
+  provider:z.enum(['disabled','simulation','official-api','website-session']).optional(),
   topics:z.array(z.object({topic:topicSchema,state:z.string().max(100)})).max(16),
 });

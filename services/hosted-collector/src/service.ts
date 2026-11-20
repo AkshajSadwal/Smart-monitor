@@ -2,22 +2,22 @@ import Fastify from 'fastify';
 import Database from 'better-sqlite3';
 import {createHash,createCipheriv,createDecipheriv,randomBytes,randomUUID} from 'node:crypto';
 import {z} from 'zod';
-import {unknownMetrics,type Candidate} from '../../../packages/contracts/index';
+import {unknownMetrics} from '../../../packages/contracts/index';
 import {hostedEvent,hostedStatus,topicsSchema,type Delivery} from '../../../packages/collection-core/hosted';
-import {normalizeResponse,responseSchema} from '../../../packages/collection-core/x-protocol';
-import {resetTime} from '../../../packages/collection-core/http';
+import {officialProvider,simulation,UpstreamError,type Cursor,type HostedProvider} from './provider';
 
 const HOUR=3_600_000;
 const safeHash=(data:string)=>createHash('sha256').update(data).digest('hex');
 const tokenRx=/^[A-Za-z0-9_-]{43}$/;
 const integer=(v:unknown)=>z.coerce.number().int().nonnegative().safe().parse(v);
 type Topic={topic:string;checkpoint:string|null;due:number;state:string;attempt:number};
-type Cursor={start:number;end:number;token?:string;done:boolean};
-type ProviderPage={posts:Candidate[];cursor:Cursor;gap?:string};
 type HostedOptions={
   mode:Delivery;clock?:()=>number;intervalMs?:number;retainMs?:number;topicLimit?:number;
-  transport?:typeof fetch;permission?:string;bearer?:string;dailyRequests?:number;dailyResources?:number;
+  transport?:typeof fetch;permission?:string;bearer?:string;dailyRequests?:number;dailyResources?:number;provider?:HostedProvider;
 };
+export const identityName=z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/);
+const secretName=(identity:string)=>identityName.parse(identity)==='default'?'x-bearer':'x-bearer:'+identity;
+const healthKey=(identity:string,key:string)=>identity==='default'?key:identity+':'+key;
 
 export class HostedStore {
   readonly db:Database.Database;
@@ -41,10 +41,10 @@ export class HostedStore {
       CREATE TABLE IF NOT EXISTS upstream(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
     `);
   }
-  issue(label:string,now=Date.now()) {
+  issue(label:string,now=Date.now(),limit=500) {
     const id=randomUUID(),token=randomBytes(32).toString('base64url');
     this.db.transaction(()=>{
-      if(Number((this.db.prepare('SELECT count(*) n FROM clients WHERE revoked=0').get() as {n:number}).n)>=500)throw new Error('Client cap reached');
+      if(Number((this.db.prepare('SELECT count(*) n FROM clients WHERE revoked=0').get() as {n:number}).n)>=limit)throw new Error('Client cap reached');
       this.db.prepare('INSERT INTO clients(id,token_hash,label,seen) VALUES (?,?,?,?)').run(id,safeHash(token),z.string().trim().min(1).max(80).parse(label),now);
       this.db.prepare('INSERT INTO audit VALUES (?,?,?)').run(now,'client-issued',id);
     })();
@@ -96,39 +96,60 @@ export class HostedStore {
       this.db.prepare('DELETE FROM audit WHERE at<?').run(now-90*24*HOUR);
     })();
   }
-  setBearer(raw:string,key:Buffer,now=Date.now()){
+  setBearer(raw:string,key:Buffer,now=Date.now(),identity='default'){
     if(key.length!==32||!raw.trim()||raw.length>4096)throw new Error('Invalid server credential or encryption key');
     const iv=randomBytes(12),cipher=createCipheriv('aes-256-gcm',key,iv);
-    cipher.setAAD(Buffer.from('smart-monitor-hosted:x-bearer:v1'));
+    const name=secretName(identity);
+    cipher.setAAD(Buffer.from('smart-monitor-hosted:'+name+':v1'));
     const body=Buffer.concat([cipher.update(raw.trim(),'utf8'),cipher.final()]);
     const sealed=Buffer.concat([iv,cipher.getAuthTag(),body]).toString('base64url');
     this.db.transaction(()=>{
-      this.db.prepare("INSERT OR REPLACE INTO secret VALUES ('x-bearer',?)").run(sealed);
-      this.db.prepare('INSERT INTO audit VALUES (?,?,?)').run(now,'credential-set','x-bearer');
-      this.db.prepare("DELETE FROM upstream WHERE key='hold'").run();
+      this.db.prepare('INSERT OR REPLACE INTO secret VALUES (?,?)').run(name,sealed);
+      this.db.prepare('INSERT INTO audit VALUES (?,?,?)').run(now,'credential-set',name);
+      this.db.prepare('DELETE FROM upstream WHERE key IN (?,?)').run(healthKey(identity,'hold'),healthKey(identity,'healthy'));
     })();
   }
-  getBearer(key:Buffer){
-    const row=this.db.prepare("SELECT cipher FROM secret WHERE name='x-bearer'").get() as {cipher:string}|undefined;
+  private bearerRow(identity:string){
+    return this.db.prepare('SELECT cipher FROM secret WHERE name=?').get(secretName(identity)) as {cipher:string}|undefined;
+  }
+  identityVersion(identity:string){const row=this.bearerRow(identity);return row?safeHash(row.cipher):null;}
+  identityStatus(identity:string,now=Date.now()){
+    const state=(name:string)=>(this.db.prepare('SELECT value FROM upstream WHERE key=?').get(healthKey(identity,name)) as {value:number}|undefined)?.value??0;
+    const configured=!!this.bearerRow(identity),retryAt=state('retry'),lastSuccess=state('healthy');
+    return {identity,provider:'official-api',configured,
+      status:!configured?'Credential required':state('hold')?'Upstream access or credit denied':retryAt>now?'Backoff':lastSuccess?'Verified':'Configured · unverified',
+      retryAt:retryAt>now?retryAt:null,lastSuccess:lastSuccess||null};
+  }
+  revokeBearer(identity:string,now=Date.now()){
+    const name=secretName(identity);
+    this.db.transaction(()=>{
+      this.db.prepare('DELETE FROM secret WHERE name=?').run(name);
+      this.db.prepare('DELETE FROM upstream WHERE key IN (?,?)').run(healthKey(identity,'hold'),healthKey(identity,'healthy'));
+      this.db.prepare('INSERT INTO audit VALUES (?,?,?)').run(now,'credential-revoked',name);
+    })();
+  }
+  getBearer(key:Buffer,identity='default'){
+    const row=this.bearerRow(identity);
     if(!row||key.length!==32)throw new Error('Server X credential is not configured');
     const data=Buffer.from(row.cipher,'base64url');
     const decipher=createDecipheriv('aes-256-gcm',key,data.subarray(0,12));
-    decipher.setAAD(Buffer.from('smart-monitor-hosted:x-bearer:v1'));
+    decipher.setAAD(Buffer.from('smart-monitor-hosted:'+secretName(identity)+':v1'));
     decipher.setAuthTag(data.subarray(12,28));
     return Buffer.concat([decipher.update(data.subarray(28)),decipher.final()]).toString('utf8');
   }
 }
 
-class UpstreamError extends Error {
-  constructor(message:string,readonly retry?:number,readonly hold=false){super(message);}
-}
 export function createHostedService(store:HostedStore,options:HostedOptions) {
   const mode=options.mode,clock=options.clock??Date.now,interval=options.intervalMs??300_000;
   const retention=options.retainMs??24*HOUR,topicLimit=options.topicLimit??200;
   const live=mode==='ids'||mode==='approved-public';
-  if(live&&(!options.permission?.trim()||!options.bearer||!options.dailyRequests||!options.dailyResources))throw new Error('Live publication requires a permission reference, operator credential and positive budgets');
+  const provider=options.provider??(mode==='simulated'?simulation(interval):
+    live&&options.bearer?officialProvider('default',()=>options.bearer!,options.transport):null);
+  if(live&&(!options.permission?.trim()||provider?.kind!=='official-api'||!options.dailyRequests||!options.dailyResources))
+    throw new Error('Live publication requires a permission reference, operator credential and positive budgets');
+  if(mode==='simulated'&&provider?.kind!=='simulation')throw new Error('Simulated mode requires the simulation provider');
+  const providerKind=provider?.kind??'disabled';
   store.db.prepare("DELETE FROM events WHERE json_extract(payload,'$.delivery')<>?").run(mode);
-  const transport=options.transport??fetch;
   const app=Fastify({logger:false,bodyLimit:8192,forceCloseConnections:true});
   const clients=new WeakMap<object,string>();
   const rate=new Map<string,{count:number;ends:number}>();
@@ -136,7 +157,7 @@ export function createHostedService(store:HostedStore,options:HostedOptions) {
   let timer:ReturnType<typeof setInterval>|undefined,flight:Promise<void>|undefined,abort:AbortController|undefined,cleanupAt=0;
   const readState=(key:string)=>(store.db.prepare('SELECT value FROM upstream WHERE key=?').get(key) as {value:number}|undefined)?.value??0;
   const writeState=(key:string,value:number)=>store.db.prepare('INSERT OR REPLACE INTO upstream VALUES (?,?)').run(key,value);
-  const response=(id:string)=>hostedStatus.parse({delivery:mode,serverTime:clock(),topics:store.current(id)});
+  const response=(id:string)=>hostedStatus.parse({delivery:mode,provider:providerKind,serverTime:clock(),topics:store.current(id)});
   app.setErrorHandler((error,_req,reply)=>{
     const status=error instanceof z.ZodError?400:Number((error as {statusCode?:number}).statusCode)||500;
     void reply.code(status).send({error:status<500?'Request rejected':'Hosted service unavailable'});
@@ -208,50 +229,36 @@ export function createHostedService(store:HostedStore,options:HostedOptions) {
       store.db.prepare('INSERT INTO usage VALUES (?,1,20) ON CONFLICT(day) DO UPDATE SET requests=requests+1,resources=resources+20').run(date);
     })();
   }
-  async function page(topic:Topic,now:number,signal:AbortSignal):Promise<ProviderPage> {
+  function windowFor(topic:Topic,now:number) {
     const old=topic.checkpoint?JSON.parse(topic.checkpoint) as Cursor:null;
     const end=Math.floor((now-40_000)/1000)*1000;
-    const start=old?.end??end-10*60_000;
+    const start=old?(old.done?old.end:old.start):end-10*60_000;
     const cursor=old&&!old.done&&old.start>=end-HOUR?old:{start:Math.max(start,end-HOUR),end,done:false};
     const gap=start<end-HOUR||!!(old&&!old.done&&old.start<end-HOUR)?'Older coverage exceeded the one-hour recovery window.':undefined;
-    if(mode==='simulated'){
-      const id='hosted-'+safeHash(`${topic.topic}:${Math.floor(now/interval)}`).slice(0,24);
-      return {cursor:{...cursor,done:true},posts:[{namespace:'mock',id,canonicalId:id,text:`Simulated update about ${topic.topic}.`,
-        authorId:'hosted-demo',handle:'hosted_demo',displayName:'Hosted simulation',language:'en',createdAt:now,kind:'original',
-        metrics:{...unknownMetrics,likes:20},observedAt:now,observation:id}]};
-    }
-    if(!live||cursor.start>=cursor.end)return {posts:[],cursor:{...cursor,done:true},gap};
-    reserve(now);
-    const params=new URLSearchParams({query:`"${topic.topic}"`,start_time:new Date(cursor.start).toISOString().replace('.000Z','Z'),
-      end_time:new Date(cursor.end).toISOString().replace('.000Z','Z'),max_results:'10',sort_order:'recency',
-      'tweet.fields':'author_id,created_at,lang,public_metrics,referenced_tweets,edit_history_tweet_ids',expansions:'author_id','user.fields':'username,name'});
-    if(cursor.token)params.set('next_token',cursor.token);
-    const res=await transport('https://api.x.com/2/tweets/search/recent?'+params,{
-      signal:AbortSignal.any([signal,AbortSignal.timeout(20_000)]),redirect:'error',headers:{Authorization:'Bearer '+options.bearer},
-    });
-    if(res.status===429)throw new UpstreamError('Rate limited',resetTime(res.headers,now,60_000));
-    if([401,402,403].includes(res.status))throw new UpstreamError('Upstream access or credit denied',undefined,true);
-    if(res.status===400&&cursor.token)return {cursor:{...cursor,token:undefined},posts:[],gap:'Cursor expired. Resuming the saved window.'};
-    if(res.status===400)throw new UpstreamError('Upstream rejected query',now+24*HOUR);
-    if(!res.ok)throw new UpstreamError('Upstream unavailable');
-    const body=responseSchema.parse(await res.json());
-    const posts=normalizeResponse(body,now,`hosted:${cursor.start}:${cursor.end}`);
-    const next=body.meta?.next_token;
-    if(next&&next===cursor.token)return {cursor:{...cursor,token:undefined},posts,gap:'Repeated cursor. Resuming the saved window.'};
-    return {posts,cursor:{...cursor,token:next,done:!next},gap:body.errors?.length?'Upstream returned partial results.':gap};
+    return {cursor,gap};
   }
   async function collect(signal:AbortSignal) {
     const now=clock();
     if(now>=cleanupAt){store.cleanup(now,retention);cleanupAt=now+60_000;for(const [key,v] of rate)if(v.ends<=now)rate.delete(key);}
-    if(mode==='disabled'||readState('hold')||readState('retry')>now)return;
+    if(mode==='disabled'||!provider)return;
+    if(provider.isCurrent?.()===false){
+      store.db.prepare("UPDATE topics SET state='Operator credential changed. Restart required.'").run();
+      return;
+    }
+    const hold=healthKey(provider.identity,'hold'),retry=healthKey(provider.identity,'retry');
+    if(live&&(readState(hold)||readState(retry)>now))return;
     const jobs=store.db.prepare('SELECT * FROM topics WHERE due<=? ORDER BY due,topic LIMIT 4').all(now) as Topic[];
     for(const topic of jobs){
       if(signal.aborted)return;
       try{
-        const result=await page(topic,now,signal);
-        if(signal.aborted)return;
+        const {cursor,gap}=windowFor(topic,now);
+        const frozen=JSON.stringify(cursor);
+        store.db.prepare('UPDATE topics SET checkpoint=? WHERE topic=?').run(frozen,topic.topic);
+        const result=await provider.collect(topic.topic,cursor,now,signal,()=>reserve(now));
+        if(signal.aborted||provider.isCurrent?.()===false)return;
         store.db.transaction(()=>{
-          if(!store.db.prepare('SELECT 1 FROM topics WHERE topic=?').get(topic.topic))return;
+          if(!store.db.prepare('SELECT 1 FROM topics WHERE topic=? AND checkpoint=?').get(topic.topic,frozen))return;
+          if(live)writeState(healthKey(provider.identity,'healthy'),now);
           for(const post of result.posts){
             const permitted=mode==='ids'?{...post,text:'',authorId:null,handle:null,displayName:null,language:null,createdAt:null,
               kind:'unknown' as const,metrics:unknownMetrics}:post;
@@ -260,16 +267,16 @@ export function createHostedService(store:HostedStore,options:HostedOptions) {
               .run(topic.topic,now,permitted.namespace+':'+permitted.id+':'+permitted.observation,JSON.stringify(event));
           }
           store.db.prepare('UPDATE topics SET checkpoint=?,state=?,due=?,attempt=0 WHERE topic=?')
-            .run(JSON.stringify(result.cursor),result.gap??(result.cursor.done?'Polling':'Paging · checkpoint saved'),
+            .run(JSON.stringify(result.cursor),result.gap??gap??(result.cursor.done?'Polling':'Paging · checkpoint saved'),
               now+(result.cursor.done?interval:Math.min(interval,30_000)),topic.topic);
         })();
       }catch(error){
-        if(signal.aborted)return;
+        if(signal.aborted||provider.isCurrent?.()===false)return;
         const issue=error instanceof UpstreamError?error:new UpstreamError('Temporary upstream or response error');
         const due=issue.retry??now+Math.min(30*60_000,30_000*2**Math.min(topic.attempt,6));
         store.db.prepare('UPDATE topics SET state=?,due=?,attempt=attempt+1 WHERE topic=?').run(issue.message,due,topic.topic);
-        if(issue.hold){writeState('hold',1);store.db.prepare("UPDATE topics SET state='Upstream access or credit denied'").run();return;}
-        if(issue.message==='Rate limited'||issue.message==='Budget paused'){writeState('retry',due);store.db.prepare('UPDATE topics SET state=?').run(issue.message);return;}
+        if(issue.hold){writeState(hold,1);store.db.prepare("UPDATE topics SET state='Upstream access or credit denied'").run();return;}
+        if(issue.message==='Rate limited'||issue.message==='Budget paused'){writeState(retry,due);store.db.prepare('UPDATE topics SET state=?').run(issue.message);return;}
       }
     }
   }

@@ -7,7 +7,7 @@ import {collectorLabel,type Alert,type CollectorId,type Overview,type Post,type 
 import {authenticate,label,request,timestamp} from './client';
 import {Mascot} from './mascot/mascot';
 import {Watchlists} from './watchlists';
-import {SettingsPage,SourcesPage} from './preferences';
+import {CoverageFields,SettingsPage,SourcesPage} from './preferences';
 
 export type Page='overview'|'watchlists'|'feed'|'notifications'|'sources'|'settings';
 const nav=[
@@ -143,7 +143,8 @@ function Dashboard({base,updates,open,celebrate}:{base:Base;updates:number;open:
         <section className="panel collector">
           <div className="panel-heading"><div><h2>Collector health</h2><p>{collectorLabel[status.source]}</p></div><Signal size={18}/></div>
           <Mascot mode={status.error?'SAD':celebrate?'CELEBRATING':base.lists.length?'IDLE':'GREETING'} reduced={base.settings.reduceMotion}/>
-          <dl className="fields"><div><dt>State</dt><dd>{status.paused?'Paused':status.status}</dd></div><div><dt>Last check</dt><dd>{timestamp(status.lastSuccess)}</dd></div><div><dt>Next check</dt><dd>{timestamp(status.nextDue)}</dd></div><div><dt>Interval</dt><dd>{status.intervalSeconds/60} min</dd></div></dl>
+          <dl className="fields"><div><dt>State</dt><dd>{status.paused?'Paused':status.status}</dd></div><div><dt>Last collection success</dt><dd>{timestamp(status.lastSuccess)}</dd></div><div><dt>Next check</dt><dd>{timestamp(status.nextDue)}</dd></div><div><dt>Interval</dt><dd>{status.intervalSeconds/60} min</dd></div></dl>
+          <CoverageFields coverage={status.coverage}/>
           {status.error&&<p className="warning">{status.error}</p>}{status.gap&&<p className="warning">{status.gap}</p>}
           <Link className="text-link" href="/sources/">Source details <ArrowRight size={15}/></Link>
         </section>
@@ -159,10 +160,10 @@ function PostRow({post,open}:{post:Post;open:Open}) {
   return <article className="post-row">
     <div className="avatar" aria-hidden="true">{author.split(/\s+/).slice(0,2).map(v=>v[0]).join('')}</div>
     <button className="post-body" onClick={()=>open(post)}>
-      <span className="post-meta"><strong>{author}</strong>{post.handle&&<span>@{post.handle}</span>}<span>{timestamp(post.createdAt??post.observedAt)}</span>{post.simulated&&<span className="chip mini">Simulated</span>}</span>
-      <span className="post-copy">{post.text??(match?'Matched post · Preview opens on X':'Hosted ID-only result · Open on X to view')}</span>
+      <span className="post-meta"><strong>{author}</strong>{post.handle&&<span>@{post.handle}</span>}<span>{timestamp(post.createdAt??post.observedAt)}</span>{post.simulated&&<span className="chip mini">Simulated</span>}{post.preview==='user-shared'&&<span className="chip mini">User-shared excerpt</span>}</span>
+      <span className="post-copy">{post.text??(post.preview==='unresolved'?`Unresolved X post · ID ${post.id}`:'Preview opens on X')}</span>
       {post.collector&&post.collector!=='mock'&&<span className="subtle">{collectorLabel[post.collector]}</span>}
-      <span className="post-reason">{match ? <><Target size={14}/> {match.listName}{post.matches.length>1?' +' + (post.matches.length-1):''} · {match.matched.join(', ')}</>:'No active match'}</span>
+      <span className="post-reason">{match ? <><Target size={14}/> {match.listName}{post.matches.length>1?' +' + (post.matches.length-1):''} · {match.matched.join(', ')}</>:post.preview==='unresolved'||post.preview==='user-shared'?'Awaiting authorized content for matching':'No active match'}</span>
     </button>
     {match&&<span className={`score ${match.classification}`} title={label(match.classification)}><strong>{match.score}</strong><small>score</small></span>}
   </article>;
@@ -188,7 +189,8 @@ function Feed({source,lists,updates,open}:{source:CollectorId;lists:Watchlist[];
         else if(result.items.some(post=>!shown.current.some(old=>old.id===post.id))) setPending(result);
         else {
           const fresh=new Map(result.items.map(p=>[p.id,p]));
-          setItems(previous=>previous.map(p=>fresh.get(p.id)??p));
+          const updated=[...result.items,...shown.current.filter(p=>!fresh.has(p.id))];
+          shown.current=updated;setItems(updated);
         }
       }).catch(error=>{if(active)setError(error.message);});
     },180);
@@ -286,8 +288,11 @@ function PostDetail({selection,onClose,run}:{selection:{source:Source;id:string}
     {!post&&!error&&<p>Loading match…</p>}
     {post&&<>
       <div className="post-meta"><strong>{post.displayName??'X post'}</strong>{post.handle&&<span>@{post.handle}</span>}{post.simulated&&<span className="chip">Simulated</span>}</div>
+      {post.preview==='user-shared'&&<p className="subtle">User-shared excerpt</p>}
       <p>{post.text??'Open the original on X to read this post.'}</p>
+      {(post.preview==='unresolved'||post.preview==='user-shared')&&!post.matches.length&&<p className="subtle">The monitor is awaiting authorized post content before evaluating watchlist rules.</p>}
       <p className="subtle">Created {timestamp(post.createdAt)} · Collected {timestamp(post.observedAt)} · {post.kind}</p>
+      {!!post.provenance?.length&&<p className="subtle">Sources · {post.provenance.map(id=>collectorLabel[id]).join(', ')}</p>}
       {post.originalUrl&&<a className="button" href={post.originalUrl} target="_blank" rel="noreferrer">Open original <ExternalLink size={16}/></a>}
       <div className="metrics">{Object.entries(post.metrics).map(([key,value])=><div key={key}><small>{key}</small><strong>{value===null?'Unknown':value.toLocaleString()}</strong></div>)}</div>
       {post.matches.map(match=><details key={match.listId} className="explain" open><summary>{match.score} · {label(match.classification)} · {match.listName}</summary>

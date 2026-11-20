@@ -28,7 +28,7 @@ export class Monitor {
     const due=this.store.value<number|null>(`next:${row.id}`,null);
     return {paused:this.store.paused,source:row.id,status:this.store.paused?'Paused':row.status,
       lastSuccess:row.last_success_at,nextDue:this.store.paused||due===Number.MAX_SAFE_INTEGER?null:due,
-      error:row.error_code,gap:row.gap,intervalSeconds:this.store.settings.intervalSeconds};
+      error:row.error_code,gap:row.gap,intervalSeconds:this.store.settings.intervalSeconds,coverage:this.store.coverage(row.id)};
   }
   signal(...names:string[]) { for (const name of names) this.events.emit('change',name); }
   start() { this.running=true;this.wake(); }
@@ -91,11 +91,16 @@ export class Monitor {
     const lists=this.store.lists.filter(l=>l.enabled);
     if ((lists.length||source==='hosted') && collector && now>=this.store.value(`next:${source}`,0)) {
       const next=now+1000*settings.intervalSeconds;
+      if(source==='mock'||source==='hosted')this.store.changeCoverage(source,{lastAttempt:now,pages:0,posts:0,budgetBlocked:false});
       const success=await collector.collect(lists,now,signal,this.commit(source,lists,signal));
       if (signal.aborted) return;
       if (success) this.success(source,now,next);
       else if (this.store.value(`next:${source}`,0)<=now) this.store.set(`next:${source}`,next);
-      if(success&&!signal.aborted)await collector.refreshSignals?.(now,signal);
+      if(success&&!signal.aborted&&collector.refreshSignals){
+        const key=source+':signals',before=this.store.value(key,null);
+        await collector.refreshSignals(now,signal);
+        if(!signal.aborted&&JSON.stringify(before)!==JSON.stringify(this.store.value(key,null)))this.rerankStored(undefined,'x');
+      }
       this.signal('posts.changed','overview.changed','source.changed');
     }
     if (signal.aborted) return;
@@ -120,6 +125,12 @@ export class Monitor {
       this.store.db.transaction(()=>{
         for (const post of posts) this.ingest({...post,collector:source},lists,now,false,historical);
         if(key)this.store.set(key,state);
+        if(source==='mock'||source==='hosted'){
+          const coverage=this.store.coverage(source);
+          const times=posts.flatMap(post=>post.createdAt===null?[]:[post.createdAt]);
+          if(posts.length||source==='mock')this.store.changeCoverage(source,{pages:coverage.pages+1,posts:coverage.posts+posts.length,
+            ...(times.length?{oldest:Math.min(coverage.oldest??Infinity,...times),newest:Math.max(coverage.newest??0,...times)}:{})});
+        }
       })();
       if(posts.length) {
         this.store.run('UPDATE data_sources SET last_success_at=? WHERE id=?',now,source);
@@ -141,10 +152,18 @@ export class Monitor {
     this.rank(post.namespace,post.id,lists,now,recheck,historical,false);
   }
   rerank(namespace:Source,id:string,authorId:string|null,now=this.clock()) {
+    const rows=authorId?this.store.all<{id:string}>('SELECT id FROM posts WHERE namespace=? AND author_id=?',namespace,authorId):[{id}];
+    this.rerankRows(rows.map(row=>({...row,namespace})),now);
+  }
+  rerankStored(listId?:string,namespace?:Source) {
+    const rows=this.store.all<{namespace:Source;id:string}>(`SELECT DISTINCT p.namespace,p.id FROM posts p JOIN scores s ON s.namespace=p.namespace AND s.post_id=p.id
+      WHERE p.text IS NOT NULL ${listId?'AND s.list_id=?':''} ${namespace?'AND p.namespace=?':''}`,...[listId,namespace].filter(value=>value!==undefined));
+    this.rerankRows(rows,this.clock());
+  }
+  private rerankRows(rows:{namespace:Source;id:string}[],now:number) {
     const lists=this.store.lists.filter(list=>list.enabled);
-    const rows=authorId?this.store.all<{id:string}>('SELECT id FROM posts WHERE namespace=? AND author_id=? ORDER BY id=? DESC,last_seen_at DESC LIMIT 100',namespace,authorId,id):[{id}];
     this.store.db.transaction(()=>{
-      for(const row of rows)this.rank(namespace,row.id,lists,now,false,false,true);
+      for(const row of rows)this.rank(row.namespace,row.id,lists,now,false,false,true);
     })();
   }
   private rank(namespace:Source,id:string,lists:Watchlist[],now:number,recheck:boolean,historical:boolean,feedbackOnly:boolean) {
@@ -162,12 +181,20 @@ export class Monitor {
     const affinity=authorId ? this.store.get<{sum:number|null}>(`
       SELECT sum(CASE WHEN f.rating='irrelevant' THEN -1 WHEN f.rating='useful' OR f.favorite=1 THEN 1 ELSE 0 END) sum
       FROM feedback f JOIN posts p ON p.namespace=f.namespace AND p.id=f.post_id WHERE p.namespace=? AND p.author_id=?`,namespace,authorId)?.sum : null;
+    const feedback=this.store.feedback(namespace,id);
     const relation=(kind:string)=>this.store.get<{value:number}>(`
       SELECT a.value FROM account_relationships a JOIN data_sources d ON d.id=a.source_id AND d.account_id=a.account_id
       WHERE a.source_id=? AND a.author_id=? AND a.kind=? AND a.expires_at>?`,
       namespace==='x'?(this.store.active.id==='session'?'session':'x'):'mock',authorId,kind,now)?.value;
     const relationship=storeFollowing(this.store,namespace,authorId,now);
-    const factors={...prefs,following:relation('following')??relationship,likedAuthor:relation('liked-author'),feedback:affinity?+(affinity>0):undefined,
+    const authorLikes=namespace==='x'&&authorId&&candidate.metrics.likes!==null&&candidate.createdAt!==null?
+      this.store.all<{likes:number}>(`SELECT json_extract(metrics_json,'$.likes') AS likes FROM posts
+        WHERE namespace=? AND author_id=? AND canonical_id<>? AND json_type(metrics_json,'$.likes')='integer'
+        AND created_at IS NOT NULL AND abs((last_seen_at-created_at)-?)<=3600000
+        ORDER BY last_seen_at DESC LIMIT 20`,namespace,authorId,candidate.canonicalId,candidate.observedAt-candidate.createdAt).map(row=>row.likes).sort((a,b)=>a-b):[];
+    const factors={...prefs,following:relation('following')??relationship,likedAuthor:relation('liked-author'),
+      feedback:feedback.rating==='irrelevant'?0:feedback.rating==='useful'||feedback.favorite?1:affinity?+(affinity>0):undefined,
+      authorMedianLikes:authorLikes.length>=5?authorLikes[Math.floor(authorLikes.length/2)]:undefined,
       previous:previous?{collectedAt:previous.collected_at,metrics:json<Metrics>(previous.metrics)}:undefined,
       repeated:!!(authorId && this.store.get('SELECT 1 FROM posts WHERE namespace=? AND author_id=? AND content_hash=? AND id<>? AND first_seen_at BETWEEN ? AND ? LIMIT 1',
         namespace,authorId,hash(candidate.text.normalize('NFKC').toLowerCase().replace(/\s+/gu,' ').trim()),id,first-24*60*minute,first))};
@@ -193,6 +220,10 @@ export class Monitor {
       if (recheck && prior?.classification==='silent' && result.classification!=='silent') {
         match.classification='delayed';
         match.previousScore=prior.score;
+      }
+      if(feedbackOnly&&prior?.classification==='delayed'&&result.classification!=='silent'){
+        match.classification='delayed';
+        match.previousScore=prior.previousScore;
       }
       eligibleRecheck ||= match.classification==='silent' && result.score>=list.standard-10;
       matches.push(match);
@@ -244,7 +275,7 @@ export class Monitor {
   private decide(source:Source,id:string,jobId:string,now:number,settings:Settings,due:number) {
     const row=this.store.row(source,id);
     this.store.run('DELETE FROM monitoring_jobs WHERE id=?',jobId);
-    if (!row || this.store.get('SELECT 1 FROM notifications WHERE namespace=? AND canonical_id=?',source,row.canonical_id)) return;
+    if (!row?.text || this.store.get('SELECT 1 FROM notifications WHERE namespace=? AND canonical_id=?',source,row.canonical_id)) return;
     const priorities={silent:0,standard:1,delayed:2,immediate:3};
     const day=localTime(now,settings.quiet.zone).day;
     const prefs=this.store.preferences(source,row.author_id);

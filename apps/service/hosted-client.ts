@@ -61,7 +61,7 @@ const hostedTransport:Transport=async(origin,path,token,signal,body)=>{
 };
 
 type Config={origin:string;topics:string[];consent:boolean};
-type Telemetry={topics:string[];latencyMs:number|null;delivery:Delivery;coverage:string|null};
+type Telemetry={topics:string[];latencyMs:number|null;delivery:Delivery;coverage:string|null;provider?:z.infer<typeof hostedStatus>['provider']};
 const inputSchema=z.strictObject({origin:z.string().trim().min(1).max(255),topics:topicsSchema,consent:z.literal(true)});
 export class HostedClient implements Collector {
   readonly id='hosted';
@@ -79,7 +79,7 @@ export class HostedClient implements Collector {
     const config=this.config;
     if(!config)return undefined;
     const t=this.store.value<Telemetry|null>('hosted:telemetry',null);
-    return {origin:config.origin,topics:t?.topics??[],approvedTopics:config.topics,latencyMs:t?.latencyMs??null,delivery:t?.delivery??'unknown',consent:config.consent};
+    return {origin:config.origin,topics:t?.topics??[],approvedTopics:config.topics,latencyMs:t?.latencyMs??null,delivery:t?.delivery??'unknown',provider:t?.provider,consent:config.consent};
   }
   private setStatus(state:string,error:string|null=null,gap:string|null=null){
     this.store.run("UPDATE data_sources SET status=?,error_code=?,gap=? WHERE id='hosted'",state,error,gap);
@@ -151,7 +151,7 @@ export class HostedClient implements Collector {
   }
   private telemetry(value:z.infer<typeof hostedStatus>,started:number){
     const coverage=value.topics.find(topic=>!/^(?:Queued|Polling)$/.test(topic.state))?.state??null;
-    const t:Telemetry={topics:value.topics.map(topic=>topic.topic),delivery:value.delivery,latencyMs:Date.now()-started,coverage};
+    const t:Telemetry={topics:value.topics.map(topic=>topic.topic),delivery:value.delivery,provider:value.provider,latencyMs:Date.now()-started,coverage};
     this.store.set('hosted:telemetry',t);
     return t;
   }

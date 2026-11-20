@@ -86,6 +86,8 @@ export type Match = Score & {listId:string;listName:string;revision:number;suppr
 export type Post = Omit<Candidate,'observation'|'text'> & {
   text:string|null; originalUrl:string|null; firstSeenAt:number; simulated:boolean; matches:Match[];
   feedback:Feedback; preferences:Preferences; snapshots?:{collectedAt:number;metrics:Metrics}[];
+  preview?:'simulation'|'user-shared'|'metadata'|'unresolved';
+  provenance?:CollectorId[];
 };
 export type Alert = {
   id:string; namespace:Source; postId:string|null; listName:string|null; decisionAt:number;
@@ -95,6 +97,13 @@ export type Alert = {
 export type MonitorStatus = {
   paused:boolean; source:CollectorId; status:string; lastSuccess:number|null; nextDue:number|null;
   error:string|null; gap:string|null; intervalSeconds:number;
+  coverage?:CollectionCoverage;
+};
+export type CollectionCoverage = {
+  lastAttempt:number|null; pages:number; posts:number; oldest:number|null; newest:number|null; budgetBlocked:boolean;
+};
+export type SourceCapability = {
+  label:string; state:'Available'|'Limited'|'Unverified'|'Authentication required'|'Permission required'|'Unsupported'; detail?:string;
 };
 export type Overview = {today:number;priority:number;lists:number;unread:number;status:MonitorStatus};
 export type SourceInfo = {
@@ -103,6 +112,9 @@ export type SourceInfo = {
   account?:string|null; expiresAt?:number|null; gap?:string|null;
   options?:{pages:number;pageSize:number;recoveryHours:number;stream:boolean};
   syncing?:boolean;
+  coverage?:CollectionCoverage;
+  features?:SourceCapability[];
+  personalSync?:{lastSuccess:number|null;partial:boolean;followingComplete:boolean;following:number;liked:number};
   publicTopics?:string[];
-  hosted?:{origin:string;topics:string[];approvedTopics:string[];latencyMs:number|null;delivery:string;consent:boolean};
+  hosted?:{origin:string;topics:string[];approvedTopics:string[];latencyMs:number|null;delivery:string;provider?:'disabled'|'simulation'|'official-api'|'website-session';consent:boolean};
 };

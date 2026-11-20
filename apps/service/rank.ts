@@ -3,7 +3,7 @@ import { normalize,termKey,type Candidate,type Metrics,type Rule,type Score,type
 const references = {likes:500,reposts:100,replies:100,views:50000};
 const growthWeights = {likes:1,reposts:2,replies:1};
 const hour = 3_600_000;
-type Factors = {muted?:boolean;favorite?:boolean;feedback?:number;following?:number;likedAuthor?:number;repeated?:boolean;previous?:{collectedAt:number;metrics:Metrics}};
+type Factors = {muted?:boolean;favorite?:boolean;feedback?:number;following?:number;likedAuthor?:number;repeated?:boolean;authorMedianLikes?:number;previous?:{collectedAt:number;metrics:Metrics}};
 
 export function contains(text:string, term:string) {
   const literal = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -34,6 +34,9 @@ export function scorePost(post:Candidate, rule:Rule, settings:Settings, factors:
     const count = post.metrics[key];
     return count === null ? [] : [Math.min(1,Math.log1p(count)/Math.log1p(references[key]))];
   });
+  const baseline=factors.authorMedianLikes;
+  const relative=baseline===undefined||post.metrics.likes===null?undefined:Math.min(1,(post.metrics.likes+1)/(2*(baseline+1)));
+  const absolute=popularity.length?popularity.reduce((a,b)=>a+b,0)/popularity.length:undefined;
   let velocity: number | undefined;
   let detail: string | undefined;
   const previous = factors.previous;
@@ -53,7 +56,7 @@ export function scorePost(post:Candidate, rule:Rule, settings:Settings, factors:
   }
   const values: Partial<Record<Signal,number>> = {
     term: Math.min(1,relevance),
-    popularity: popularity.length ? popularity.reduce((a,b) => a+b,0)/popularity.length : undefined,
+    popularity:absolute===undefined||relative===undefined?absolute:.75*absolute+.25*relative,
     velocity: velocity === undefined ? undefined : Math.min(1,Math.log1p(velocity)/Math.log(101)),
     following:factors.following,likedAuthor:factors.likedAuthor,
     favorite:factors.favorite || (account && rule.favoriteAuthors.includes(account)) ? 1 : undefined,
@@ -65,7 +68,7 @@ export function scorePost(post:Candidate, rule:Rule, settings:Settings, factors:
     const value = values[key], weight=settings.weights[key];
     if (!weight) continue;
     if (value === undefined) unavailable.push(key);
-    else signals.push({key,value,weight,...(key === 'velocity' ? {detail} : {})});
+    else signals.push({key,value,weight,...(key === 'velocity' ? {detail} : key==='popularity'&&relative!==undefined?{detail:`Includes author-relative likes. Comparable median: ${baseline}.`}:{})});
   }
   const penalties:Score['penalties'] = [];
   if (new Set(post.text.match(/https?:\/\/[^\s]+/gi)).size >= 3) penalties.push({reason:'Three or more outbound links',points:10});

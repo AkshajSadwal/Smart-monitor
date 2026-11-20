@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import {createHash,randomUUID} from 'node:crypto';
 import {existsSync,rmSync} from 'node:fs';
-import { defaults,normalize,termKey,type Alert,type Candidate,type CollectorId,type Feedback,type Match,type Post,type Preferences,type Rule,type Settings,type Source,type Watchlist } from '../../packages/contracts/index';
+import { defaults,normalize,termKey,type Alert,type Candidate,type CollectionCoverage,type CollectorId,type Feedback,type Match,type Post,type Preferences,type Rule,type Settings,type Source,type Watchlist } from '../../packages/contracts/index';
 
 const migrations = [
   `
@@ -154,6 +154,12 @@ export class Store {
   get paused() {return this.value('paused',true);}
   get sources() {return this.all<SourceRow>('SELECT * FROM data_sources ORDER BY id');}
   get active() {return this.get<SourceRow>('SELECT * FROM data_sources WHERE active=1')!;}
+  coverage(id:CollectorId) {
+    return this.value<CollectionCoverage>('coverage:'+id,{lastAttempt:null,pages:0,posts:0,oldest:null,newest:null,budgetBlocked:false});
+  }
+  changeCoverage(id:CollectorId,update:Partial<CollectionCoverage>) {
+    this.set('coverage:'+id,{...this.coverage(id),...update});
+  }
   get lists():Watchlist[] {
     return this.all<ListRow>('SELECT w.*, (SELECT count(*) FROM scores s WHERE s.list_id=w.id) AS matches FROM watchlists w ORDER BY created_at,id')
       .map(row=>({...json<Rule>(row.rule_json),id:row.id,revision:row.revision,createdAt:row.created_at,updatedAt:row.updated_at,matches:row.matches}));
@@ -181,11 +187,15 @@ export class Store {
   post(row:PostRow,detail=false):Post {
     const p=this.candidate(row);
     const [source,id]=[p.namespace,p.id];
-    return {namespace:source,id,canonicalId:p.canonicalId,text:source==='mock'?p.text:null,
+    const saved=source==='x'?this.get<{metadata:string}>("SELECT metadata FROM post_display WHERE namespace='x' AND post_id=?",id):undefined;
+    const preview=saved?json<{shared?:string}>(saved.metadata).shared:undefined;
+    const provenance=this.all<{collector:CollectorId}>('SELECT collector FROM post_sources WHERE namespace=? AND post_id=? ORDER BY observed_at DESC,collector',source,id).map(value=>value.collector);
+    return {namespace:source,id,canonicalId:p.canonicalId,text:source==='mock'?p.text:preview??null,
+      preview:source==='mock'?'simulation':preview?'user-shared':p.text?'metadata':'unresolved',
       authorId:p.authorId,handle:source==='mock'?p.handle:null,displayName:source==='mock'?p.displayName:null,
       language:p.language,createdAt:p.createdAt,kind:p.kind,metrics:p.metrics,observedAt:p.observedAt,
       simulated:source==='mock',firstSeenAt:row.first_seen_at,originalUrl:canonicalUrl(source,id),
-      collector:this.get<{collector:CollectorId}>('SELECT collector FROM post_sources WHERE namespace=? AND post_id=? ORDER BY observed_at DESC,collector LIMIT 1',source,id)?.collector,
+      collector:provenance[0],...(detail?{provenance}:{}),
       matches:this.matches(source,id).map(match=>detail?match:{...match,signals:[],unavailable:[],penalties:[]}),
       feedback:this.feedback(source,id),preferences:this.preferences(source,p.authorId),
       ...(detail?{snapshots:this.all<{collected_at:number;metrics:string}>('SELECT collected_at,metrics FROM engagement_snapshots WHERE namespace=? AND post_id=? ORDER BY collected_at DESC LIMIT 20',source,id).map(s=>({collectedAt:s.collected_at,metrics:json(s.metrics)}))}:{})};

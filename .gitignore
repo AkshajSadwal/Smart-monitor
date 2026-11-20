@@ -41,6 +41,9 @@ release/
 *.db
 *.db-*
 *.db3
+*.sqlite.migration-*
+/docs.zip
+/tree.zip
 
 # Credentials and secrets
 .env
@@ -51,6 +54,7 @@ release/
 *.key
 *.p12
 *.pfx
+*.hex
 
 # Logs and temporary files
 *.log
