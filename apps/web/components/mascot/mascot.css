@@ -1,0 +1,48 @@
+.robot-stage { position: relative; display: grid; place-items: center; isolation: isolate; }
+.robot-surface { position: absolute; inset: 0; }
+.robot-stage canvas { display: block; width: 100%; height: 100%; }
+.mascot-portrait { display: block; width: 112%; max-width: none; height: 100%; object-fit: contain; filter: drop-shadow(0 2px 2px #100c1b60); }
+.robot-avatar[data-expression="SAD"] .mascot-portrait { transform: translateY(2px) rotate(-8deg); opacity: .72; }
+.robot-avatar[data-expression="CELEBRATING"] { border-color: #bafb69; background: radial-gradient(circle at 38% 24%, #4a5349, #252d2a 78%); }
+.robot-avatar[data-expression="THINKING"] .mascot-portrait { transform: rotate(8deg); }
+.robot-shadow {
+  position: absolute;
+  width: 58%;
+  height: 14%;
+  bottom: 6%;
+  left: 21%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, #07060caa, transparent 72%);
+  z-index: -1;
+}
+.robot-avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 35px;
+  height: 35px;
+  border: 1px solid #878099;
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 24%, #554765, #2a2235 78%);
+}
+.avatar-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 13%;
+  width: 74%;
+  aspect-ratio: 1.45;
+  border-radius: 49% 55% 47% 44% / 56% 47% 52% 47%;
+  transform: rotate(5deg);
+  background: radial-gradient(ellipse at 33% 23%, #ffffff 8%, #f7f7f7 57%, #c5c7cc 100%);
+  box-shadow: 0 2px 4px #100e19aa, inset 0 0 1px #fff;
+}
+.avatar-body i { width: 13%; height: 27%; border-radius: 50%; background: #282038; }
+.robot-fallback { position: absolute; inset: 50% auto auto 50%; width: 80%; height: auto; aspect-ratio: 1.4; transform: translate(-50%, -50%); background: transparent; border: 0; }
+.robot-fallback .avatar-body { animation: avatar-float 3.8s ease-in-out infinite; }
+@keyframes avatar-float { 50% { transform: translateY(-6%) rotate(-3deg); } }
+.robot-stage { width: min(100%, 250px); height: 140px; }
+[data-reduced="true"] .robot-fallback .avatar-body { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .robot-fallback .avatar-body { animation: none; }
+}

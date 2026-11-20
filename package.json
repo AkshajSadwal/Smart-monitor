@@ -1,0 +1,54 @@
+{
+  "name": "x-smart-monitor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": "^24.0.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run build:web && tsx apps/service/cli.ts start --foreground",
+    "build": "npm run build:web && npm run build:service",
+    "build:web": "npm run build -w @monitor/web",
+    "build:service": "esbuild apps/service/cli.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/monitor.mjs",
+    "build:hosted": "esbuild services/hosted-collector/src/main.ts --bundle --platform=node --format=cjs --external:better-sqlite3 --outfile=dist/hosted.cjs",
+    "hosted": "node dist/hosted.cjs",
+    "desktop:package": "node scripts/package-desktop.mjs",
+    "monitor": "node dist/monitor.mjs",
+    "typecheck": "tsc --noEmit && npm run typecheck -w @monitor/web",
+    "lint": "eslint apps packages services fixtures tests",
+    "test": "tsx --test tests/*.test.ts",
+    "test:performance": "tsx tests/performance.ts",
+    "test:hosted": "tsx tests/hosted-runtime.ts",
+    "test:desktop:win": "tsx tests/desktop-smoke.ts",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.0.0",
+    "@napi-rs/keyring": "^1.0.0",
+    "better-sqlite3": "^12.0.0",
+    "fastify": "^5.0.0",
+    "node-notifier": "^10.0.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^24.0.0",
+    "@types/node-notifier": "^8.0.0",
+    "esbuild": "^0.25.0",
+    "eslint": "^9.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.0.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true
+  }
+}

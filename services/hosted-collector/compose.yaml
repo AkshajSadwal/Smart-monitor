@@ -1,0 +1,43 @@
+services:
+  hosted:
+    build:
+      context: ../..
+      dockerfile: services/hosted-collector/Dockerfile
+    environment:
+      HOSTED_MODE: ${HOSTED_MODE:-disabled}
+      HOSTED_PERMISSION_REFERENCE: ${HOSTED_PERMISSION_REFERENCE:-}
+      HOSTED_DAILY_REQUESTS: ${HOSTED_DAILY_REQUESTS:-0}
+      HOSTED_DAILY_RESOURCES: ${HOSTED_DAILY_RESOURCES:-0}
+      HOSTED_INTERVAL_SECONDS: ${HOSTED_INTERVAL_SECONDS:-300}
+      HOSTED_RETENTION_HOURS: ${HOSTED_RETENTION_HOURS:-24}
+      HOSTED_MASTER_KEY_FILE: /run/operator/master.hex
+    volumes:
+      - hosted-data:/data
+      - ${HOSTED_SECRETS_DIR:-./operator-secrets}:/run/operator:ro
+    networks: [backend]
+    read_only: true
+    tmpfs: [/tmp]
+    init: true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+  proxy:
+    image: caddy:2-alpine
+    environment:
+      HOSTED_DOMAIN: ${HOSTED_DOMAIN:-monitor.example.com}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [backend]
+    depends_on: [hosted]
+    restart: unless-stopped
+networks:
+  backend:
+volumes:
+  hosted-data:
+  caddy-data:
+  caddy-config:
