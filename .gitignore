@@ -10,3 +10,70 @@ playwright-report/
 release/
 operator-secrets/
 .env*
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+.vercel/
+next-env.d.ts.bak
+
+# Compiled output
+dist/
+build/
+out/
+release/
+*.tsbuildinfo
+
+# Electron installers
+*.exe
+*.msi
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*.blockmap
+*.asar
+
+# Local databases
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.db3
+
+# Credentials and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs and temporary files
+*.log
+logs/
+*.pid
+tmp/
+temp/
+.cache/
+.turbo/
+
+# Testing artifacts
+coverage/
+test-results/
+playwright-report/
+blob-report/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+
+# Local browser profiles
+browser-profile-*/
+browser-profiles/
+playwright/.cache/
