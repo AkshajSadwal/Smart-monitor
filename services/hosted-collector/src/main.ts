@@ -2,6 +2,7 @@ import {readFileSync,mkdirSync} from 'node:fs';
 import {dirname,resolve} from 'node:path';
 import {z} from 'zod';
 import {deliverySchema} from '../../../packages/collection-core/hosted';
+import {tweetId} from '../../../packages/collection-core/x-protocol';
 import {HostedStore,createHostedService,identityName} from './service';
 import {officialProvider} from './provider';
 
@@ -19,13 +20,19 @@ async function main(){
   const store=new HostedStore(path);
   const [command='serve',action,argument]=process.argv.slice(2);
   if(command==='client'&&action==='issue'){
-    console.log(JSON.stringify(store.issue(argument??'',Date.now(),value('HOSTED_CLIENT_LIMIT',500,1,5000))));
+    console.log(JSON.stringify(store.issue(argument??'',Date.now(),value('HOSTED_CLIENT_LIMIT',500,1,5000),value('HOSTED_TOKEN_TTL_HOURS',720,1,8760)*3_600_000)));
     store.db.close();
     return;
   }
   if(command==='client'&&action==='revoke'){
     store.revoke(z.uuid().parse(argument));
     store.db.close();
+    return;
+  }
+  if(command==='content'&&action==='purge'){
+    store.purgePost(tweetId.parse(argument));
+    store.db.close();
+    console.log('Post removed from hosted replay.');
     return;
   }
   if(command==='credential'&&action==='status'){
@@ -54,7 +61,7 @@ async function main(){
   }
   if(command!=='serve')throw new Error('Invalid operator command');
   const mode=deliverySchema.parse(process.env.HOSTED_MODE??'disabled');
-  const live=mode==='ids'||mode==='approved-public';
+  const live=mode==='ids'||mode==='metadata'||mode==='approved-public';
   const kind=z.enum(['disabled','simulation','official-api','website-session']).parse(process.env.HOSTED_PROVIDER||(live?'official-api':mode==='simulated'?'simulation':'disabled'));
   if(kind==='website-session'){
     console.error('Hosted authenticated website-session collection is unsupported. An authorized provider is required.');
@@ -70,10 +77,12 @@ async function main(){
     provider=officialProvider(identity,()=>bearer,fetch,()=>store.identityVersion(identity)===version);
   }
   const service=createHostedService(store,{
-    mode,permission:process.env.HOSTED_PERMISSION_REFERENCE,provider,
+    mode,permission:process.env.HOSTED_PERMISSION_REFERENCE,provider,licenseConfirmed:process.env.HOSTED_LICENSE_CONFIRMED==='true',
     intervalMs:value('HOSTED_INTERVAL_SECONDS',300,30,3600)*1000,retainMs:value('HOSTED_RETENTION_HOURS',24,1,168)*3_600_000,
     topicLimit:value('HOSTED_TOPIC_LIMIT',200,1,1000),dailyRequests:value('HOSTED_DAILY_REQUESTS',0,0,50000),
     dailyResources:value('HOSTED_DAILY_RESOURCES',0,0,1_000_000),
+    dailyUsdCents:value('HOSTED_DAILY_USD_CENTS',0,0,1_000_000),
+    maxResourceUsdMicros:value('HOSTED_MAX_RESOURCE_USD_MICROS',0,0,10_000_000),
   });
   await service.app.listen({host:process.env.HOSTED_BIND??'127.0.0.1',port:value('HOSTED_PORT',8787,1,65535)});
   service.start();

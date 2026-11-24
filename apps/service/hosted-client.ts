@@ -60,9 +60,9 @@ const hostedTransport:Transport=async(origin,path,token,signal,body)=>{
   });
 };
 
-type Config={origin:string;topics:string[];consent:boolean};
+type Config={origin:string;topics:string[];consent:boolean;liveTermsAccepted?:boolean};
 type Telemetry={topics:string[];latencyMs:number|null;delivery:Delivery;coverage:string|null;provider?:z.infer<typeof hostedStatus>['provider']};
-const inputSchema=z.strictObject({origin:z.string().trim().min(1).max(255),topics:topicsSchema,consent:z.literal(true)});
+const inputSchema=z.strictObject({origin:z.string().trim().min(1).max(255),topics:topicsSchema,consent:z.literal(true),liveTermsAccepted:z.boolean().optional()});
 export class HostedClient implements Collector {
   readonly id='hosted';
   readonly capabilities=['Consent-based topic subscriptions','Authenticated SSE and checkpoint replay','Ranking and alerts run locally'];
@@ -79,7 +79,8 @@ export class HostedClient implements Collector {
     const config=this.config;
     if(!config)return undefined;
     const t=this.store.value<Telemetry|null>('hosted:telemetry',null);
-    return {origin:config.origin,topics:t?.topics??[],approvedTopics:config.topics,latencyMs:t?.latencyMs??null,delivery:t?.delivery??'unknown',provider:t?.provider,consent:config.consent};
+    return {origin:config.origin,topics:t?.topics??[],approvedTopics:config.topics,latencyMs:t?.latencyMs??null,delivery:t?.delivery??'unknown',
+      provider:t?.provider,consent:config.consent,liveTermsAccepted:config.liveTermsAccepted,hydration:this.store.value<string|null>('hosted:hydration',null)};
   }
   private setStatus(state:string,error:string|null=null,gap:string|null=null){
     this.store.run("UPDATE data_sources SET status=?,error_code=?,gap=? WHERE id='hosted'",state,error,gap);
@@ -135,22 +136,30 @@ export class HostedClient implements Collector {
       throw new ApiError(429,'HOST_RATE_LIMIT','The hosted service is rate limited.');
     }
     if(!response.ok){
-      await response.body?.cancel();
-      throw new ApiError(response.status,[401,403].includes(response.status)?'HOST_ACCESS_DENIED':response.status===409?'HOST_CONFLICT':'HOST_UNAVAILABLE','Hosted request rejected.');
+      let code=[401,403].includes(response.status)?'HOST_ACCESS_DENIED':response.status===409?'HOST_CONFLICT':'HOST_UNAVAILABLE';
+      if(response.status===401||response.status===403){
+        const parsed=await this.body(response,4096).then(text=>JSON.parse(text) as {code?:string}).catch(()=>null);
+        if(parsed?.code==='TOKEN_EXPIRED')code='HOST_TOKEN_EXPIRED';
+        if(parsed?.code==='LIVE_TERMS_REQUIRED')code='LIVE_TERMS_REQUIRED';
+      }else await response.body?.cancel();
+      throw new ApiError(response.status,code,'Hosted request rejected.');
     }
     return response;
   }
-  private async statusResponse(response:Response){
+  private async body(response:Response,limit:number){
     if(!response.body)throw new Error('Empty hosted status');
     let data='';
-    for await(const line of lines(response.body,16384)){
+    for await(const line of lines(response.body,limit)){
       data+=line;
-      if(data.length>16384)throw new Error('Hosted status too large');
+      if(data.length>limit)throw new Error('Hosted status too large');
     }
-    return hostedStatus.parse(JSON.parse(data));
+    return data;
+  }
+  private async statusResponse(response:Response){
+    return hostedStatus.parse(JSON.parse(await this.body(response,16384)));
   }
   private telemetry(value:z.infer<typeof hostedStatus>,started:number){
-    const coverage=value.topics.find(topic=>!/^(?:Queued|Polling)$/.test(topic.state))?.state??null;
+    const coverage=value.topics.find(topic=>!/^(?:Queued|Polling)$/.test(topic.state))?.state??this.store.value<string|null>('hosted:replay-gap',null);
     const t:Telemetry={topics:value.topics.map(topic=>topic.topic),delivery:value.delivery,provider:value.provider,latencyMs:Date.now()-started,coverage};
     this.store.set('hosted:telemetry',t);
     return t;
@@ -167,12 +176,38 @@ export class HostedClient implements Collector {
       this.setStatus(result.delivery==='disabled'?'Publication unavailable':'Connected',result.delivery==='disabled'?'PUBLICATION_DISABLED':null);
     }catch(error){this.failure(error);throw new ApiError(503,'HOST_CHECK_FAILED','The hosted service check failed. See connection diagnostics.');}
   }
+  async verifySimulation(){
+    const config=this.config;
+    if(!config?.consent)throw new ApiError(409,'CONSENT_REQUIRED','Configure a test VM and approve its public topics first.');
+    const abort=new AbortController();
+    const signal=AbortSignal.any([abort.signal,AbortSignal.timeout(15_000)]);
+    try{
+      const status=await this.statusResponse(await this.call(config,'/v1/status',signal));
+      if(status.delivery!=='simulated')throw new ApiError(409,'SIMULATION_REQUIRED','The acceptance probe requires simulated delivery on the VM.');
+      const allowed=new Set(this.allowedTopics(this.store.lists,config));
+      const active=status.topics.filter(t=>allowed.has(t.topic));
+      if(!active.length)throw new ApiError(409,'SUBSCRIPTION_REQUIRED','Start Hosted Monitoring with approved test topics before running the probe.');
+      const response=await this.call(config,'/v1/events?after=0',signal);
+      if(!response.body||!response.headers.get('content-type')?.startsWith('text/event-stream'))throw new Error('Invalid stream');
+      for await(const line of lines(response.body,524288)){
+        if(!line.startsWith('data: '))continue;
+        const event=hostedEvent.safeParse(JSON.parse(line.slice(6)));
+        if(event.success&&event.data.delivery==='simulated'&&allowed.has(event.data.topic))
+          return {status:'Authenticated HTTPS and simulated SSE verified',approvedSubscriptions:active.length};
+      }
+      throw new Error('No approved simulated event');
+    }catch(error){
+      if(error instanceof ApiError)throw error;
+      throw new ApiError(503,'HOST_VERIFICATION_FAILED','Could not verify a retained simulated event. Wait for a VM collection cycle and retry.');
+    }finally{abort.abort();}
+  }
   async collect(lists:Watchlist[],_now:number,signal:AbortSignal){
     const config=this.config;
     if(!config?.consent||!this.row.configured)return false;
     const topics=this.allowedTopics(lists,config),started=Date.now();
     try{
-      const result=await this.subscription(()=>this.call(config,'/v1/subscriptions',AbortSignal.any([signal,AbortSignal.timeout(12_000)]),{topics}).then(r=>this.statusResponse(r)));
+      const update={topics,...(config.liveTermsAccepted?{liveTermsAccepted:true}:{})};
+      const result=await this.subscription(()=>this.call(config,'/v1/subscriptions',AbortSignal.any([signal,AbortSignal.timeout(12_000)]),update).then(r=>this.statusResponse(r)));
       if(signal.aborted)return false;
       const t=this.telemetry(result,started);
       this.eligible=result.delivery!=='disabled'&&t.topics.length>0;
@@ -213,7 +248,12 @@ export class HostedClient implements Collector {
           this.setStatus('Streaming',null,t.coverage);
           this.streamFailures=0;
         }
-        if(event==='gap')this.setStatus('Streaming',null,'Some hosted events expired before they could be resumed.');
+        if(event==='gap'){
+          const reason=z.object({reason:z.string()}).parse(parsed).reason;
+          const message=reason==='delivery-cap'?'The hosted publication limit stopped delivery.':'Some hosted events expired before they could be resumed.';
+          this.store.set('hosted:replay-gap',message);
+          this.setStatus('Streaming',null,message);
+        }
         if(event==='post'&&Number.isSafeInteger(id)&&id>cursor){
           const packet=hostedEvent.parse(parsed);
           const now=Date.now();
@@ -240,10 +280,10 @@ export class HostedClient implements Collector {
   private failure(error:unknown){
     this.eligible=false;
     const code=error instanceof ApiError?error.code:'HOST_UNAVAILABLE';
-    if(code==='HOST_ACCESS_DENIED'||code==='CLIENT_CREDENTIAL_REQUIRED'){
+    if(['HOST_ACCESS_DENIED','CLIENT_CREDENTIAL_REQUIRED','HOST_TOKEN_EXPIRED','LIVE_TERMS_REQUIRED'].includes(code)){
       this.streamAfter=Number.MAX_SAFE_INTEGER;
       this.store.set('next:hosted',this.streamAfter);
-      this.setStatus('Authentication required',code);
+      this.setStatus(code==='HOST_TOKEN_EXPIRED'?'Client token expired':code==='LIVE_TERMS_REQUIRED'?'X terms acknowledgement required':'Authentication required',code);
       return;
     }
     if(code!=='HOST_RATE_LIMIT'){

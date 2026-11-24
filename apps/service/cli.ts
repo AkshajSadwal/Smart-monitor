@@ -33,15 +33,15 @@ function readRuntime():Runtime|null {
     return /^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(value.origin)&&/^[\w-]{43}$/.test(value.token)?value:null;
   } catch {return null;}
 }
-async function control<T>(path:string,method='GET',body?:unknown):Promise<T> {
+async function control<T>(path:string,method='GET',body?:unknown,timeout=10_000):Promise<T> {
   const info=readRuntime();
   if (!info) throw new Error('The local monitor is stopped.');
   const response=await fetch(info.origin+'/api/control/'+path,{
     method,headers:{'x-monitor-control':info.token,...(body===undefined?{}:{'Content-Type':'application/json'})},
-    body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(10_000),
+    body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(timeout),
   });
   const result=await response.json();
-  if (!response.ok) throw new Error(result.error?.message??'Local control request failed.');
+  if (!response.ok) throw new ApiError(response.status,result.error?.code??'REQUEST_FAILED',result.error?.message??'Local control request failed.');
   return result as T;
 }
 async function alive() {try {await control('status');return true;} catch {return false;}}
@@ -222,10 +222,41 @@ async function main() {
     console.log('Hosted credential stored in the OS vault.');
     return;
   }
+  if(command==='verify-x'||command==='verify-oauth'){
+    const cap=process.argv[4]?.match(/^--cap-cents=(\d{1,3})$/);
+    if(option!=='--confirm-paid'||!cap||+cap[1]<1||+cap[1]>100){
+      console.log('NOT TESTED — EXPLICIT PAID OPT-IN AND A CAP OF 1–100 US CENTS REQUIRED');
+      return;
+    }
+    if(!await alive()){
+      console.log('NOT TESTED — START THE LOCAL SERVICE WITH A CONFIGURED CREDENTIAL');
+      return;
+    }
+    try{
+      console.log(JSON.stringify(await control('verify-x','POST',{source:command==='verify-x'?'x':'session',capCents:+cap[1],confirm:true},25_000),null,2));
+    }catch(error){
+      if(error instanceof ApiError&&error.code==='CREDENTIAL_REQUIRED'){
+        console.log('NOT TESTED — CREDENTIALS REQUIRED');
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
+  if(command==='purge-x'&&/^\d{1,25}$/.test(option??'')&&process.argv[4]==='--confirm'){
+    await control('purge-x','POST',{id:option});
+    console.log('X post removed from this profile.');
+    return;
+  }
+  if(command==='verify-hosted'){
+    if(option!=='--confirm-vm'){console.log('NOT TESTED — EXPLICIT VM OPT-IN REQUIRED');return;}
+    console.log(JSON.stringify(await control('verify-hosted','POST',{confirm:true},18_000),null,2));
+    return;
+  }
   if(command==='status') {console.log(JSON.stringify(await control('status'),null,2));return;}
   if(command==='stop') {if(await alive())await control('stop','POST');return;}
   if(command==='pause'||command==='resume') {await control('pause','POST',{paused:command==='pause'});return;}
-  console.log('Usage: monitor start [--foreground] | open | status | pause | resume | stop | credentials set/remove | hosted-credential set');
+  console.log('Usage: monitor start [--foreground] | open | status | pause | resume | stop | credentials set/remove | hosted-credential set | verify-x or verify-oauth --confirm-paid --cap-cents=N | verify-hosted --confirm-vm | purge-x POST_ID --confirm');
 }
 
 void main().catch(error=>{

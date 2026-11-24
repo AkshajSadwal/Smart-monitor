@@ -50,7 +50,8 @@ function showNotice(message,child){
   notice.once('failed',()=>{send('unavailable');notifications.delete(message.id);});
   notice.once('show',()=>send('submitted'));
   notice.once('close',()=>notifications.delete(message.id));
-  notice.show();
+  try{notice.show();}
+  catch{notifications.delete(message.id);send('unavailable');}
 }
 async function ensureWorker(){
   if(stopping||worker||await getStatus())return;
@@ -68,7 +69,8 @@ async function ensureWorker(){
       setTimeout(()=>{if(worker===child)attempt=0;},30_000).unref();
       void refreshTray().catch(report);
     }
-    if(message?.type==='notification'&&typeof message.id==='string'&&typeof message.title==='string'&&typeof message.message==='string')showNotice(message,child);
+    if(message?.type==='notification'&&/^[\da-f-]{36}$/i.test(message.id)&&typeof message.title==='string'&&message.title.length<=128
+      &&typeof message.message==='string'&&message.message.length<=500)showNotice(message,child);
     if(message?.type==='activate'){
       if(typeof message.url==='string'&&allowX(message.url))void shell.openExternal(message.url);
       else if(typeof message.id==='string'&&/^[\w-]{1,100}$/.test(message.id))void openWindow({post:message.id,source:message.source==='x'?'x':'mock'}).catch(report);
@@ -100,6 +102,7 @@ async function openWindow(detail={}){
   }
   const {url}=await control('bootstrap','POST',detail);
   const origin=new URL(url).origin;
+  if(!/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(origin))throw new Error('Invalid monitor origin.');
   if(window&&new URL(window.webContents.getURL()||url).origin!==origin)window.destroy();
   if(!window){
     window=new BrowserWindow({width:1240,height:850,minWidth:320,minHeight:500,show:false,
@@ -112,6 +115,9 @@ async function openWindow(detail={}){
       event.preventDefault();
       const external=new URL(target);
       if(external.origin==='https://x.com'&&external.pathname==='/i/oauth2/authorize')void shell.openExternal(external.href);
+    });
+    window.webContents.on('will-redirect',(event,target)=>{
+      if(new URL(target).origin!==origin)event.preventDefault();
     });
     window.webContents.setWindowOpenHandler(({url:target})=>{
       if(allowX(target))void shell.openExternal(target);

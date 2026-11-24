@@ -46,15 +46,20 @@ export const settingsSchema = z.strictObject({
   importantTerms:z.array(z.string().trim().min(1).max(100)).max(32),
   retentionDays:z.number().int().min(1).max(90),
   reduceMotion:z.boolean(), nativeNotifications:z.boolean(),
+  simulatedNotifications:z.boolean().default(false),
+  hydrateHosted:z.boolean().default(false),
+  officialEmbeds:z.boolean().default(false),
   dailyRequests:z.number().int().min(0).max(5000),
   dailyResources:z.number().int().min(0).max(100000),
+  dailyUsdCents:z.number().int().min(0).max(1_000_000).default(0),
+  maxResourceUsdMicros:z.number().int().min(0).max(10_000_000).default(0),
   consoleBudgetConfirmed:z.boolean(),
 });
 export type Settings = z.infer<typeof settingsSchema>;
 export const defaults: Settings = {
   intervalSeconds:300, dailyCap:20, quiet:{enabled:false,start:'22:00',end:'08:00',zone:Intl.DateTimeFormat().resolvedOptions().timeZone},
   weights:defaultWeights, importantTerms:[], retentionDays:30, reduceMotion:false, nativeNotifications:true,
-  dailyRequests:0, dailyResources:0, consoleBudgetConfirmed:false,
+  simulatedNotifications:false,hydrateHosted:false,officialEmbeds:false,dailyRequests:0,dailyResources:0,dailyUsdCents:0,maxResourceUsdMicros:0,consoleBudgetConfirmed:false,
 };
 export const feedbackSchema = z.strictObject({rating:z.enum(['useful','irrelevant']).nullable(),favorite:z.boolean()});
 export const preferencesSchema = z.strictObject({muted:z.boolean(),favorite:z.boolean()});
@@ -86,8 +91,9 @@ export type Match = Score & {listId:string;listName:string;revision:number;suppr
 export type Post = Omit<Candidate,'observation'|'text'> & {
   text:string|null; originalUrl:string|null; firstSeenAt:number; simulated:boolean; matches:Match[];
   feedback:Feedback; preferences:Preferences; snapshots?:{collectedAt:number;metrics:Metrics}[];
-  preview?:'simulation'|'user-shared'|'metadata'|'unresolved';
+  preview?:'simulation'|'user-shared'|'metadata'|'unresolved'|'stale';
   provenance?:CollectorId[];
+  hydration?:string;
 };
 export type Alert = {
   id:string; namespace:Source; postId:string|null; listName:string|null; decisionAt:number;
@@ -110,11 +116,12 @@ export type SourceInfo = {
   id:CollectorId; active:boolean; configured:boolean; status:string; capabilities:string[];
   error:string|null; projectedRequests:number; requests:number; resources:number; resetAt:number;
   account?:string|null; expiresAt?:number|null; gap?:string|null;
-  options?:{pages:number;pageSize:number;recoveryHours:number;stream:boolean};
+    options?:{pages:number;pageSize:number;recoveryHours:number;stream:boolean;streamBudgetConfirmed?:boolean};
   syncing?:boolean;
   coverage?:CollectionCoverage;
   features?:SourceCapability[];
   personalSync?:{lastSuccess:number|null;partial:boolean;followingComplete:boolean;following:number;liked:number};
   publicTopics?:string[];
-  hosted?:{origin:string;topics:string[];approvedTopics:string[];latencyMs:number|null;delivery:string;provider?:'disabled'|'simulation'|'official-api'|'website-session';consent:boolean};
+  hosted?:{origin:string;topics:string[];approvedTopics:string[];latencyMs:number|null;delivery:string;provider?:'disabled'|'simulation'|'official-api'|'website-session';consent:boolean;liveTermsAccepted?:boolean;hydration?:string|null};
+  budget?:{reservedUsdMicros:number;dailyUsdCents:number;searchPageUsdMicros:number|null};
 };

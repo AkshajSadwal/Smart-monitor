@@ -17,7 +17,7 @@ const now=Date.parse('2026-11-20T12:00:00Z');
 const rule=watchlist.parse({name:'SQLite',terms:[{direction:'include',kind:'word',text:'SQLite'}]});
 const fixture:Candidate={namespace:'x',id:'42',canonicalId:'42',text:'SQLite release',createdAt:now-60_000,observedAt:now,
   authorId:'9',displayName:'Fixture',handle:'example',language:'en',kind:'original',observation:'initial',metrics:{...unknownMetrics,likes:2}};
-const budget={...defaults,consoleBudgetConfirmed:true,dailyRequests:40,dailyResources:1200};
+const budget={...defaults,consoleBudgetConfirmed:true,dailyRequests:40,dailyResources:1200,dailyUsdCents:5000,maxResourceUsdMicros:10000};
 const signal=new AbortController().signal;
 const json=(value:unknown,status=200,headers:HeadersInit={})=>new Response(JSON.stringify(value),{status,headers});
 function memoryVault(){
@@ -28,8 +28,10 @@ function memoryVault(){
 
 test('website permission, vault-only grant, saved cursor, expiry and reconnect',async()=>{
   const store=new Store(':memory:'),{vault,values}=memoryVault();
-  const list=store.saveList(rule,now);
+  const list=store.saveList({...rule,standard:40,immediate:50,cooldownSeconds:0},now);
   let calls=0;
+  let dispatched=0;
+  const monitor=new Monitor(store,()=>now,async()=>{dispatched++;return 'submitted';});
   const driver:AuthorizedWebsiteDriver={authorizationReference:'fixture-only',
     authorizeInteractively:async()=>({opaqueGrant:'local-fixture-session',handle:'fixture',expiresAt:Date.now()+60_000}),
     async search(grant,_lists,cursor){
@@ -37,7 +39,7 @@ test('website permission, vault-only grant, saved cursor, expiry and reconnect',
       if(++calls===1){assert.equal(cursor,null);return json({items:[fixture],next:'first-cursor'});}
       assert.equal(cursor,'first-cursor');
       if(calls===2)return json({},401);
-      return json({items:[{...fixture,id:'43',canonicalId:'43'}],next:null});
+      return json({items:[{...fixture,id:'43',canonicalId:'43',text:'SQLite follow-up benchmark'}],next:null});
     },
   };
   try{
@@ -51,13 +53,24 @@ test('website permission, vault-only grant, saved cursor, expiry and reconnect',
     assert.equal(values.get('website-grant'),'local-fixture-session');
     assert.equal(store.count("SELECT count(*) n FROM settings WHERE value_json LIKE '%local-fixture-session%'"),0);
     const received:Candidate[]=[];
-    assert.equal(await site.search([list],signal,posts=>received.push(...posts)),true);
+    store.run("UPDATE data_sources SET active=0 WHERE id='mock'");
+    store.run("UPDATE data_sources SET active=1,configured=1 WHERE id='session'");
+    monitor.pause(false);
+    const commit=(posts:Candidate[])=>{
+      for(const post of posts)monitor.ingest(post,[list],now,false,false);
+      received.push(...posts);
+    };
+    assert.equal(await site.search([list],signal,commit),true);
+    await monitor.tick();
+    assert.equal(dispatched,1);
     site=new WebsiteSession(store,vault,driver);
     assert.equal(await site.search([list],signal,()=>assert.fail()),false);
     assert.equal(site.state.status,'Session expired');
     assert.equal(await site.search([list],signal,()=>assert.fail()),false);
     await site.connect(signal);
-    assert.equal(await site.search([list],signal,posts=>received.push(...posts)),true);
+    assert.equal(await site.search([list],signal,commit),true);
+    await monitor.tick();
+    assert.equal(dispatched,2);
     assert.deepEqual(received.map(p=>[p.id,p.collector,p.metrics.likes]),[['42','session',2],['43','session',2]]);
     await site.disconnect();
     assert.equal(site.state.status,'Authentication required');
@@ -289,7 +302,7 @@ test('hosted restart preserves cursor and authorized replay with isolated identi
       if(requests===2)return json({},429,{'Retry-After':'60'});
       return json({data:[{id:'44',text:fixture.text}]});
     },()=>store.identityVersion('alpha')===version);
-    return createHostedService(store,{provider,mode:'ids',clock:()=>time,permission:'fixture',dailyRequests:8,dailyResources:200,topicLimit:1});
+    return createHostedService(store,{provider,mode:'ids',clock:()=>time,permission:'fixture',dailyRequests:8,dailyResources:200,dailyUsdCents:5000,maxResourceUsdMicros:10000,topicLimit:1});
   };
   store.setBearer('fixture-alpha',encryptionKey,now,'alpha');
   store.setBearer('fixture-beta',encryptionKey,now,'beta');
@@ -297,8 +310,8 @@ test('hosted restart preserves cursor and authorized replay with isolated identi
   assert.throws(()=>store.issue('C',now,2),/Client cap/);
   let service=create();
   try{
-    for(const person of [alice,bob])assert.equal((await service.app.inject({method:'PUT',url:'/v1/subscriptions',headers:headers(person.token),payload:{topics:['sqlite']}})).statusCode,200);
-    assert.equal((await service.app.inject({method:'PUT',url:'/v1/subscriptions',headers:headers(bob.token),payload:{topics:['other']}})).statusCode,409);
+    for(const person of [alice,bob])assert.equal((await service.app.inject({method:'PUT',url:'/v1/subscriptions',headers:headers(person.token),payload:{topics:['sqlite'],liveTermsAccepted:true}})).statusCode,200);
+    assert.equal((await service.app.inject({method:'PUT',url:'/v1/subscriptions',headers:headers(bob.token),payload:{topics:['other'],liveTermsAccepted:true}})).statusCode,409);
     await service.tick();
     assert.equal(store.identityStatus('alpha',time).status,'Verified');
     assert.equal(store.identityStatus('beta',time).status,'Configured · unverified');

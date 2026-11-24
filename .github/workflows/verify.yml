@@ -1,0 +1,80 @@
+name: Verify and package
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            platform: windows-x64
+            target: --win --x64
+          - runner: macos-15-intel
+            platform: macos-x64
+            target: --mac --x64
+          - runner: macos-15
+            platform: macos-arm64
+            target: --mac --arm64
+          - runner: ubuntu-24.04
+            platform: linux-x64
+            target: --linux --x64
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.local/browsers
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npm run build:hosted
+      - run: npm run test:hosted
+      - name: Install Chromium and Linux dependencies
+        shell: bash
+        if: runner.os == 'Linux'
+        run: |
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y binutils xz-utils rpm libarchive-tools fakeroot desktop-file-utils
+      - name: Install Chromium
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium
+      - run: npm run test:e2e
+      - name: Package unsigned
+        run: npm run desktop:package -- ${{ matrix.target }} --publish never
+      - name: Run native desktop smoke
+        if: runner.os != 'Linux'
+        run: npm run test:desktop
+      - name: Run Linux desktop smoke under Xvfb
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:desktop
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smart-monitor-${{ matrix.platform }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.deb
+            release/*.rpm
+          if-no-files-found: error
+          retention-days: 7

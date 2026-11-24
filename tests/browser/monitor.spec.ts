@@ -26,7 +26,8 @@ test('production launcher, watchlist preview, closed-tab polling, feedback and d
   await page.goto(initial);
   await expect(page.getByRole('heading',{name:'Dashboard'})).toBeVisible();
   await page.getByRole('link',{name:'Settings',exact:true}).click();
-  await page.getByRole('checkbox',{name:'Desktop notifications'}).uncheck();
+  await page.getByRole('checkbox',{name:'Desktop notifications',exact:true}).uncheck();
+  await expect(page.getByRole('checkbox',{name:'Allow desktop notifications for simulated posts'})).not.toBeChecked();
   await page.getByRole('checkbox',{name:'Reduce motion'}).check();
   await page.getByRole('button',{name:'Save settings'}).click();
   await expect(page.getByText('Settings saved.')).toBeVisible();
@@ -121,4 +122,20 @@ test('source controls enforce hosted consent and preserve the selected source af
   await expect(post.getByText('A user-selected example about SQLite')).toBeVisible();
   await expect(post.getByText('User-shared excerpt')).toBeVisible();
   await expect(post.getByText(/awaiting authorized post content/)).toBeVisible();
+  let widgetRequests=0;
+  await page.route('https://platform.twitter.com/widgets.js',route=>{
+    widgetRequests++;
+    return route.fulfill({contentType:'text/javascript',body:"document.body.insertAdjacentHTML('beforeend','<p>Fixture widget loaded</p>');"});
+  });
+  await page.keyboard.press('Escape');
+  await page.getByRole('link',{name:'Settings',exact:true}).click();
+  await page.getByRole('checkbox',{name:/Offer official X embeds/}).check();
+  await page.getByRole('button',{name:'Save settings'}).click();
+  await expect(page.getByText('Settings saved.')).toBeVisible();
+  await page.goto(new URL('/feed/?post=42&source=x',page.url()).toString());
+  await page.getByText('Official X embed',{exact:true}).click();
+  expect(widgetRequests).toBe(0);
+  await page.getByRole('button',{name:'Agree and load X embed'}).click();
+  await expect(page.frameLocator('iframe[title="Official X post"]').getByText('Fixture widget loaded')).toBeVisible();
+  expect(widgetRequests).toBe(1);
 });

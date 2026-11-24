@@ -106,7 +106,7 @@ export function Workspace({page}:{page:Page}) {
         {base&&page==='settings'&&<SettingsPage settings={base.settings} run={run} busy={busy}/>}
       </div>
     </main>
-    {base&&detail&&<PostDetail selection={detail} onClose={close} run={run}/>}
+    {base&&detail&&<PostDetail key={detail.source+':'+detail.id} selection={detail} embeds={base.settings.officialEmbeds} onClose={close} run={run}/>}
   </div>;
 }
 export type Run=(work:()=>Promise<unknown>,message?:string)=>Promise<boolean>;
@@ -161,7 +161,7 @@ function PostRow({post,open}:{post:Post;open:Open}) {
     <div className="avatar" aria-hidden="true">{author.split(/\s+/).slice(0,2).map(v=>v[0]).join('')}</div>
     <button className="post-body" onClick={()=>open(post)}>
       <span className="post-meta"><strong>{author}</strong>{post.handle&&<span>@{post.handle}</span>}<span>{timestamp(post.createdAt??post.observedAt)}</span>{post.simulated&&<span className="chip mini">Simulated</span>}{post.preview==='user-shared'&&<span className="chip mini">User-shared excerpt</span>}</span>
-      <span className="post-copy">{post.text??(post.preview==='unresolved'?`Unresolved X post · ID ${post.id}`:'Preview opens on X')}</span>
+      <span className="post-copy">{post.text??(post.preview==='unresolved'?`Unresolved X post · ID ${post.id}`:post.preview==='stale'?'X metadata needs a fresh lookup':'Preview opens on X')}</span>
       {post.collector&&post.collector!=='mock'&&<span className="subtle">{collectorLabel[post.collector]}</span>}
       <span className="post-reason">{match ? <><Target size={14}/> {match.listName}{post.matches.length>1?' +' + (post.matches.length-1):''} · {match.matched.join(', ')}</>:post.preview==='unresolved'||post.preview==='user-shared'?'Awaiting authorized content for matching':'No active match'}</span>
     </button>
@@ -278,8 +278,9 @@ export function Modal({title,children,close}:{title:string;children:ReactNode;cl
     <div className="dialog-content"><header><h2>{title}</h2><button className="icon-button" onClick={close} aria-label="Close dialog"><X size={22}/></button></header>{children}</div>
   </dialog>;
 }
-function PostDetail({selection,onClose,run}:{selection:{source:Source;id:string};onClose:()=>void;run:Run}) {
+function PostDetail({selection,embeds,onClose,run}:{selection:{source:Source;id:string};embeds:boolean;onClose:()=>void;run:Run}) {
   const [post,setPost]=useState<Post|null>(null),[error,setError]=useState('');
+  const [showEmbed,setShowEmbed]=useState(false);
   const path=`/posts/${selection.source}/${encodeURIComponent(selection.id)}`;
   const load=useCallback(async()=>setPost(await request<Post>(path)),[path]);
   useEffect(()=>{void load().catch(e=>setError(e.message));},[load]);
@@ -291,9 +292,16 @@ function PostDetail({selection,onClose,run}:{selection:{source:Source;id:string}
       {post.preview==='user-shared'&&<p className="subtle">User-shared excerpt</p>}
       <p>{post.text??'Open the original on X to read this post.'}</p>
       {(post.preview==='unresolved'||post.preview==='user-shared')&&!post.matches.length&&<p className="subtle">The monitor is awaiting authorized post content before evaluating watchlist rules.</p>}
+      {post.hydration&&<p className="warning">{post.hydration}</p>}
+      {post.preview==='stale'&&<p className="subtle">Cached X metadata has expired. Open the original for the current post.</p>}
       <p className="subtle">Created {timestamp(post.createdAt)} · Collected {timestamp(post.observedAt)} · {post.kind}</p>
       {!!post.provenance?.length&&<p className="subtle">Sources · {post.provenance.map(id=>collectorLabel[id]).join(', ')}</p>}
       {post.originalUrl&&<a className="button" href={post.originalUrl} target="_blank" rel="noreferrer">Open original <ExternalLink size={16}/></a>}
+      {embeds&&post.originalUrl&&<details className="explain"><summary>Official X embed</summary>
+        <p>Loading the embed connects to X. X may receive viewing and device information for its own services, personalization, or advertising. Manage those uses in your X privacy settings.</p>
+        {showEmbed?<iframe title="Official X post" src={`/api/v1/embed/x/${encodeURIComponent(post.id)}`} sandbox="allow-scripts" referrerPolicy="no-referrer" width="100%" height="380"/>:
+          <button className="button" onClick={()=>setShowEmbed(true)}>Agree and load X embed</button>}
+      </details>}
       <div className="metrics">{Object.entries(post.metrics).map(([key,value])=><div key={key}><small>{key}</small><strong>{value===null?'Unknown':value.toLocaleString()}</strong></div>)}</div>
       {post.matches.map(match=><details key={match.listId} className="explain" open><summary>{match.score} · {label(match.classification)} · {match.listName}</summary>
         <p>Matched {match.matched.join(', ')}</p>{match.previousScore!==undefined&&<p>Previous score {match.previousScore}</p>}{match.suppression&&<p className="warning">{match.suppression}</p>}

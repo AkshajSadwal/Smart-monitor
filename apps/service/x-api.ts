@@ -23,9 +23,9 @@ type SessionGrant=SignalConsent & {accountId:string;username:string|null;expires
 type SignalProgress={token?:string;complete:boolean;begun:number;retry?:boolean};
 export const collectorOptions=z.strictObject({
   pages:z.number().int().min(1).max(12),pageSize:z.number().int().min(10).max(100),
-  recoveryHours:z.number().int().min(1).max(168),stream:z.boolean(),
+  recoveryHours:z.number().int().min(1).max(168),stream:z.boolean(),streamBudgetConfirmed:z.boolean().default(false),
 });
-export const xOptions={pages:4,pageSize:10,recoveryHours:1,stream:false};
+export const xOptions={pages:4,pageSize:10,recoveryHours:1,stream:false,streamBudgetConfirmed:false};
 
 export interface Vault { get(key:string):Promise<string|null>; set(key:string,value:string):Promise<void>; remove(key:string):Promise<void> }
 export class OSVault implements Vault {
@@ -53,8 +53,22 @@ export class OSVault implements Vault {
   }
 }
 
-type Issue='RATE_LIMIT'|'NETWORK'|'ACCESS_DENIED'|'CREDITS_REQUIRED'|'BUDGET_EXHAUSTED'|'CREDENTIAL_REQUIRED'|'SESSION_EXPIRED'|'VERIFICATION_REQUIRED'|'UPSTREAM_INVALID'|'PAGE_INVALID';
+type Issue='RATE_LIMIT'|'NETWORK'|'ENDPOINT_UNAVAILABLE'|'ACCESS_DENIED'|'CREDITS_REQUIRED'|'BUDGET_EXHAUSTED'|'CREDENTIAL_REQUIRED'|'INVALID_CREDENTIALS'|'SESSION_EXPIRED'|'VERIFICATION_REQUIRED'|'UPSTREAM_INVALID'|'PAGE_INVALID';
 class XIssue extends Error {constructor(readonly code:Issue,readonly retryAt:number|null=null) {super(code);}}
+const issueText:Record<Issue,string>={
+  RATE_LIMIT:'X rate limited this credential. Retry after the reported reset.',
+  NETWORK:'The monitor could not establish a connection to X.',
+  ENDPOINT_UNAVAILABLE:'The X endpoint is currently unavailable.',
+  ACCESS_DENIED:'X denied this operation. Check the app’s endpoint entitlement and OAuth scopes.',
+  CREDITS_REQUIRED:'X reports that this project has insufficient credits.',
+  BUDGET_EXHAUSTED:'The configured monetary, resource, or request limit blocked the request.',
+  CREDENTIAL_REQUIRED:'Set the X credential or unlock the OS vault before checking.',
+  INVALID_CREDENTIALS:'X rejected the credential. Replace it and check again.',
+  SESSION_EXPIRED:'The OAuth authorization expired or was revoked. Reconnect from Data sources.',
+  VERIFICATION_REQUIRED:'X requires account verification before allowing this request.',
+  UPSTREAM_INVALID:'X returned an invalid response. Review collection diagnostics.',
+  PAGE_INVALID:'X rejected the current watchlist query.',
+};
 
 export class XApi implements LiveCollector {
   private chain=Promise.resolve<unknown>(undefined);
@@ -63,12 +77,12 @@ export class XApi implements LiveCollector {
   constructor(readonly store:Store,readonly vault:Vault,readonly transport:Receive=fetch,readonly changed:()=>void=()=>{},
     readonly id:'x'|'session'='x') {}
   private get row(){return this.store.sources.find(row=>row.id===this.id)!;}
-  get settings(){return this.store.value(`${this.id}:options`,xOptions);}
+  get settings(){return {...xOptions,...this.store.value<Partial<typeof xOptions>>(`${this.id}:options`,{})};}
   get account(){return this.store.value<SessionGrant|null>('session:grant',null);}
   configure(input:unknown) {
     const options=collectorOptions.parse(input);
     if(this.id==='session'&&options.stream)throw new ApiError(400,'UNSUPPORTED','Filtered Stream requires app-only authentication.');
-    if(options.stream&&!paid(this.store.settings))throw new ApiError(409,'BUDGET_REQUIRED','Confirm a provider-side spending ceiling first.');
+    if(options.stream&&(!paid(this.store.settings)||!options.streamBudgetConfirmed))throw new ApiError(409,'BUDGET_REQUIRED','Confirm a provider-enforced hard spending ceiling for the stream first.');
     this.store.set(`${this.id}:options`,options);
     if(this.id==='x'){
       this.store.set('x:stream-next',0);
@@ -82,20 +96,28 @@ export class XApi implements LiveCollector {
     this.chain=result.catch(()=>{});
     return result;
   }
-  private reserve(now:number,resources:number) {
+  private reserve(now:number,resources:number,capCents?:number) {
     const settings=this.store.settings;
     if (!paid(settings)) throw new XIssue('BUDGET_EXHAUSTED');
     const date=new Date(now).toISOString().slice(0,10);
     this.store.db.transaction(()=>{
       const row=this.store.get<{requests:number;resources:number}>('SELECT * FROM usage_buckets WHERE day=?',date);
-      if ((row?.requests??0)+1>settings.dailyRequests||(row?.resources??0)+resources>settings.dailyResources) throw new XIssue('BUDGET_EXHAUSTED',Date.parse(date)+day);
+      const price=resources*settings.maxResourceUsdMicros;
+      const key='usage:cost:'+date;
+      const prior=this.store.value(key,(row?.resources??0)*settings.maxResourceUsdMicros);
+      if ((row?.requests??0)+1>settings.dailyRequests||(row?.resources??0)+resources>settings.dailyResources ||
+        prior+price>settings.dailyUsdCents*10_000||(capCents!==undefined&&price>capCents*10_000))
+        throw new XIssue('BUDGET_EXHAUSTED',Date.parse(date)+day);
       this.store.run('INSERT INTO usage_buckets VALUES (?,1,?) ON CONFLICT(day) DO UPDATE SET requests=requests+1,resources=resources+excluded.resources',date,resources);
+      this.store.set(key,prior+price);
     })();
   }
-  private async get(path:string,parameters:URLSearchParams,now:number,resources:number,signal:AbortSignal,delegated?:string) {
+  private async get(path:string,parameters:URLSearchParams,now:number,resources:number,signal:AbortSignal,options:{delegated?:string;probe?:boolean;hosted?:boolean;capCents?:number;refreshed?:boolean}={}):Promise<unknown> {
     signal.throwIfAborted();
+    const {delegated,probe,hosted}=options;
     const source=this.store.sources.find(s=>s.id===this.id)!;
-    if ((!delegated&&(!source.active||!source.configured)) || this.store.value('erase:pending',false)) throw new XIssue('CREDENTIAL_REQUIRED');
+    const allowedHosted=hosted&&this.id==='x'&&this.store.active.id==='hosted'&&this.store.settings.hydrateHosted;
+    if ((!delegated&&(!source.configured||(!source.active&&!probe&&!allowedHosted))) || this.store.value('erase:pending',false)) throw new XIssue('CREDENTIAL_REQUIRED');
     let token:string|null;
     try {token=delegated??(this.id==='session'?await this.sessionToken(now,signal):await this.vault.get('bearer'));}
     catch(error) {throw error instanceof XIssue?error:new XIssue('CREDENTIAL_REQUIRED');}
@@ -104,7 +126,7 @@ export class XApi implements LiveCollector {
     if (this.store.sources.find(s=>s.id===this.id)?.generation!==source.generation) throw new XIssue('CREDENTIAL_REQUIRED');
     const rateAt=this.store.value(`${this.id}:rate-at`,0);
     if (rateAt>now) throw new XIssue('RATE_LIMIT',rateAt);
-    this.reserve(now,resources);
+    this.reserve(now,resources,options.capCents);
     let response:Response;
     try {
       response=await this.transport(`https://api.x.com/2/${path}?${parameters}`,{headers:{Authorization:'Bearer '+token},signal:AbortSignal.any([signal,AbortSignal.timeout(20_000)]),redirect:'error'});
@@ -120,7 +142,13 @@ export class XApi implements LiveCollector {
       const at=Number(response.headers.get('x-rate-limit-reset'))*1000;
       if (Number.isFinite(at)&&at>now) this.store.set(`${this.id}:rate-at`,at+1000);
     }
-    if (response.status===401) throw new XIssue(this.id==='session'&&!delegated?'SESSION_EXPIRED':'CREDENTIAL_REQUIRED');
+    if(response.status===401){
+      if(this.id==='session'&&!delegated&&!options.refreshed&&options.capCents===undefined&&this.account?.renewable){
+        await this.sessionToken(now,signal,true);
+        return this.get(path,parameters,now,resources,signal,{...options,refreshed:true});
+      }
+      throw new XIssue(this.id==='session'&&!delegated?'SESSION_EXPIRED':'INVALID_CREDENTIALS');
+    }
     if (response.status===402) throw new XIssue('CREDITS_REQUIRED');
     if (response.status===403) {
       const payload=await response.json().catch(()=>null) as {type?:unknown}|null;
@@ -129,7 +157,7 @@ export class XApi implements LiveCollector {
       throw new XIssue('ACCESS_DENIED');
     }
     if (response.status===400) throw new XIssue('PAGE_INVALID');
-    if (!response.ok) throw new XIssue('NETWORK');
+    if (!response.ok) throw new XIssue('ENDPOINT_UNAVAILABLE');
     return response.json() as Promise<unknown>;
   }
   private fields(extra:Record<string,string>) {
@@ -138,14 +166,19 @@ export class XApi implements LiveCollector {
   private failure(error:unknown,now:number) {
     const issue=error instanceof XIssue?error:new XIssue('UPSTREAM_INVALID');
     const states:Record<Issue,string>={
-      RATE_LIMIT:'Rate limited',NETWORK:'Backoff',ACCESS_DENIED:'Access denied',CREDITS_REQUIRED:'Credits required',
+      RATE_LIMIT:'Rate limited',NETWORK:'Network unavailable',ENDPOINT_UNAVAILABLE:'Endpoint unavailable',ACCESS_DENIED:'Access denied',CREDITS_REQUIRED:'Credits required',
       BUDGET_EXHAUSTED:'Budget paused',CREDENTIAL_REQUIRED:'Authorization required',UPSTREAM_INVALID:'Invalid API response',PAGE_INVALID:'Query or cursor rejected',
-      SESSION_EXPIRED:'Session expired',VERIFICATION_REQUIRED:'Verification required',
+      SESSION_EXPIRED:'Session expired',VERIFICATION_REQUIRED:'Verification required',INVALID_CREDENTIALS:'Invalid credentials',
     };
     this.store.run('UPDATE data_sources SET status=?,error_code=? WHERE id=?',states[issue.code],issue.code,this.id);
+    if(this.id==='session'&&issue.code==='SESSION_EXPIRED'){
+      this.store.run("DELETE FROM account_relationships WHERE source_id='session'");
+      this.store.run("DELETE FROM settings WHERE key IN ('session:signals','session:oauth') OR key LIKE 'session:sync:%'");
+      this.store.run("UPDATE data_sources SET account_id=NULL WHERE id='session'");
+    }
     const attempt=this.store.value(`${this.id}:attempt`,0)+1;
     this.store.set(`${this.id}:attempt`,attempt);
-    const terminal=['ACCESS_DENIED','CREDITS_REQUIRED','CREDENTIAL_REQUIRED','SESSION_EXPIRED','VERIFICATION_REQUIRED','PAGE_INVALID'].includes(issue.code);
+    const terminal=['ACCESS_DENIED','CREDITS_REQUIRED','CREDENTIAL_REQUIRED','INVALID_CREDENTIALS','SESSION_EXPIRED','VERIFICATION_REQUIRED','PAGE_INVALID'].includes(issue.code);
     if(issue.code==='BUDGET_EXHAUSTED'||issue.code==='CREDITS_REQUIRED'){
       this.store.changeCoverage(this.id,{budgetBlocked:true});
       this.store.run('UPDATE data_sources SET gap=? WHERE id=?','Collection may be incomplete because the request or resource budget stopped retrieval.',this.id);
@@ -271,15 +304,32 @@ export class XApi implements LiveCollector {
       } catch(error) {
         if(!signal.aborted){
           const issue=error instanceof XIssue?error.code:'UPSTREAM_INVALID';
-          this.store.set(`${this.id}:lookup-state`,issue==='ACCESS_DENIED'?'Permission required':issue==='CREDENTIAL_REQUIRED'||issue==='SESSION_EXPIRED'?'Authentication required':'Unverified');
+          this.store.set(`${this.id}:lookup-state`,issue==='ACCESS_DENIED'?'Permission required':['CREDENTIAL_REQUIRED','INVALID_CREDENTIALS','SESSION_EXPIRED'].includes(issue)?'Authentication required':'Unverified');
         }
         return {posts:[],removed:[]};
       }
     });
   }
+  hydrate(ids:string[],now:number,signal:AbortSignal) {
+    return this.serialize(async()=>{
+      const requested=ids.filter(id=>tweetId.safeParse(id).success).slice(0,10);
+      try{
+        if(!requested.length)return {posts:[],removed:[],status:'No unresolved IDs'};
+        const body=responseSchema.parse(await this.get('tweets',this.fields({ids:requested.join(',')}),now,requested.length*2,signal,{hosted:true}));
+        const posts=normalizeResponse(body,now,'hydration:'+now).filter(post=>requested.includes(post.id)&&post.text);
+        const removed=(body.errors??[]).flatMap(e=>{
+          const id=e.resource_id??e.value;
+          return id&&requested.includes(id)&&e.type?.endsWith('/resource-not-found')?[id]:[];
+        });
+        return {posts,removed,status:posts.length+new Set(removed).size===requested.length?'Lookup completed':'X returned partial lookup results'};
+      }catch(error){
+        return {posts:[],removed:[],status:error instanceof XIssue?issueText[error.code]:issueText.UPSTREAM_INVALID};
+      }
+    });
+  }
   async stream(_lists:Watchlist[],signal:AbortSignal,commit:Parameters<LiveCollector['collect']>[3]) {
     const now=Date.now();
-    if(this.id!=='x'||!this.settings.stream||!paid(this.store.settings)||!this.row.configured||
+    if(this.id!=='x'||!this.settings.stream||!this.settings.streamBudgetConfirmed||!paid(this.store.settings)||!this.row.configured||
       this.store.value('x:stream-next',0)>now||this.store.value('x:hold',false)||this.store.value('x:rate-at',0)>now)return;
     const quota=Math.min(this.settings.pageSize,50);
     const run=new AbortController();
@@ -336,30 +386,36 @@ export class XApi implements LiveCollector {
       if(signal.aborted&&this.row.status==='Streaming')this.store.run("UPDATE data_sources SET status='Polling' WHERE id='x'");
     }
   }
-  async check() {
-    const query=this.store.lists.filter(l=>l.enabled).flatMap(queryGroups)[0];
-    if(!query)throw new ApiError(409,'NO_QUERY','Create an enabled watchlist with a supported query first.');
+  async check(capCents?:number) {
     const now=Date.now();
     try {
-      await this.serialize(async()=>searchResponseSchema.parse(await this.get('tweets/search/recent',this.fields({query,max_results:'10'}),now,20,AbortSignal.timeout(22_000))));
+      const result=await this.serialize(async()=>{
+        if(!this.row.configured||!await this.vault.get(this.id==='x'?'bearer':'access'))throw new XIssue('CREDENTIAL_REQUIRED');
+        const query=this.store.lists.filter(l=>l.enabled).flatMap(queryGroups)[0];
+        if(!query)throw new ApiError(409,'NO_QUERY','Create an enabled watchlist with a supported query first.');
+        const checkpoint={start:now-15*minute,end:now-40*second,next:undefined as string|undefined};
+        const body=searchResponseSchema.parse(await this.get('tweets/search/recent',
+          this.fields({query,max_results:'10',start_time:shortTime(checkpoint.start),end_time:shortTime(checkpoint.end)}),now,20,
+          AbortSignal.timeout(22_000),{probe:true,capCents}));
+        const posts=normalizeResponse(body,now,'probe');
+        if(body.errors?.length||posts.length!==(body.data?.length??0)||(body.meta?.result_count??0)>posts.length)throw new XIssue('UPSTREAM_INVALID');
+        const key=`${this.id}:probe-checkpoint`;
+        checkpoint.next=body.meta?.next_token;
+        this.store.set(key,checkpoint);
+        const saved=this.store.value<typeof checkpoint|null>(key,null);
+        if(saved?.start!==checkpoint.start||saved.end!==checkpoint.end||saved.next!==checkpoint.next)throw new XIssue('UPSTREAM_INVALID');
+        return {status:'Credentials valid · recent search verified',normalizedPosts:posts.length,checkpointSaved:true,hasNextPage:!!saved.next};
+      });
       this.store.run(`UPDATE data_sources SET status='Search verified',error_code=NULL WHERE id='${this.id}'`);
       this.store.set(`${this.id}:search-verified`,true);
       this.store.set(`${this.id}:hold`,false);
       this.store.set(`next:${this.id}`,now+this.store.settings.intervalSeconds*1000);
+      return result;
     } catch(error) {
+      if(error instanceof ApiError)throw error;
       this.failure(error,now);
       const issue=error instanceof XIssue?error.code:'UPSTREAM_INVALID';
-      const messages:Partial<Record<Issue,string>>={
-        ACCESS_DENIED:'X denied access to recent search. Check the app’s endpoint entitlement and OAuth scopes.',
-        CREDENTIAL_REQUIRED:'X rejected the credential or the OS vault could not supply it.',
-        SESSION_EXPIRED:'The OAuth authorization expired. Reconnect from Data sources.',
-        VERIFICATION_REQUIRED:'X requires account verification before allowing this request.',
-        CREDITS_REQUIRED:'X reports that this project has insufficient credits.',
-        BUDGET_EXHAUSTED:'The configured daily budget blocked the connection check.',
-        RATE_LIMIT:'X rate limited this credential. Wait for the reset before retrying.',
-        PAGE_INVALID:'X rejected the current watchlist query.',
-      };
-      throw new ApiError(503,issue,messages[issue]??'X is unavailable or returned an invalid response. Review collection diagnostics.');
+      throw new ApiError(503,issue,issueText[issue]);
     } finally {this.changed();}
   }
   authorize(input:unknown,origin:string) {
@@ -386,42 +442,67 @@ export class XApi implements LiveCollector {
         const now=Date.now(),signal=AbortSignal.timeout(60_000);
         const body=new URLSearchParams({grant_type:'authorization_code',client_id:grant.clientId,redirect_uri:grant.redirect,code,code_verifier:grant.verifier});
         const response=await this.transport('https://api.x.com/2/oauth2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body,signal,redirect:'error'});
-        if(!response.ok||!valid())throw new XIssue('ACCESS_DENIED');
+        if(!valid())throw new XIssue('ACCESS_DENIED');
+        if(response.status===400||response.status===401){
+          await response.body?.cancel();
+          throw new ApiError(400,'OAUTH_CODE_REJECTED','X rejected the authorization code or OAuth client. Verify the redirect and start a new sign-in.');
+        }
+        if(!response.ok)throw new XIssue('ACCESS_DENIED');
         const token=authorization.parse(await response.json());
         const scope=token.scope??'';
         if(this.id==='session'&&!['tweet.read','users.read'].every(required=>scope.split(/\s+/).includes(required)))throw new XIssue('ACCESS_DENIED');
-        const identity=await this.syncSignals(grant,scope,token.access_token,now,signal,valid);
+        const {own:identity,commit}=await this.syncSignals(grant,scope,token.access_token,now,signal,valid,undefined,true);
         const accountId=identity.id;
         const keep=grant.refresh&&scope.split(/\s+/).includes('offline.access')&&token.refresh_token;
         if(this.id==='session') {
-          this.store.run("UPDATE data_sources SET vault_ref='session' WHERE id='session'");
-          if(keep)await this.vault.set('oauth-refresh',keep);
-          else await this.vault.remove('oauth-refresh');
-          await this.vault.set('access',token.access_token);
-          if(!valid())throw new XIssue('ACCESS_DENIED');
-          this.store.set('session:grant',{clientId:grant.clientId,following:grant.following,likes:grant.likes,accountId,
-            username:identity.username??null,expiresAt:now+(token.expires_in??7200)*1000,renewable:!!keep} satisfies SessionGrant);
-          this.store.run("UPDATE data_sources SET configured=1,status='Connected',error_code=NULL WHERE id='session'");
-          this.store.set('session:hold',false);
-          this.store.set('next:session',now);
-          if(grant.following||grant.likes||keep)this.store.set('session:oauth',{clientId:grant.clientId,following:grant.following,likes:grant.likes,accountId,scope,next:now+(this.syncPending(accountId)?minute:day)} satisfies OAuthSettings);
-          else this.store.run("DELETE FROM settings WHERE key='session:oauth'");
+          const oldAccountId=this.account?.accountId;
+          const previous=await this.vault.get('access'),previousRefresh=await this.vault.get('oauth-refresh');
+          try{
+            if(keep)await this.vault.set('oauth-refresh',keep);
+            else await this.vault.remove('oauth-refresh');
+            await this.vault.set('access',token.access_token);
+            if(!valid())throw new XIssue('ACCESS_DENIED');
+            this.store.db.transaction(()=>{
+              commit();
+              this.store.set('session:grant',{clientId:grant.clientId,following:grant.following,likes:grant.likes,accountId,
+                username:identity.username??null,expiresAt:now+(token.expires_in??7200)*1000,renewable:!!keep} satisfies SessionGrant);
+              this.store.run("UPDATE data_sources SET configured=1,status='Connected',error_code=NULL,vault_ref='session',last_success_at=NULL WHERE id='session'");
+              this.store.run("DELETE FROM settings WHERE key IN ('session:search-verified','session:lookup-state','session:rate-at')");
+              if(oldAccountId&&accountId!==oldAccountId)this.store.run("DELETE FROM settings WHERE key LIKE 'cursor:session:%'");
+              this.store.set('session:hold',false);
+              this.store.set('next:session',now);
+              if(grant.following||grant.likes||keep)this.store.set('session:oauth',{clientId:grant.clientId,following:grant.following,likes:grant.likes,accountId,scope,next:now+(this.syncPending(accountId)?minute:day)} satisfies OAuthSettings);
+              else this.store.run("DELETE FROM settings WHERE key='session:oauth'");
+            })();
+          }catch(error){
+            if(previous)await this.vault.set('access',previous);
+            else await this.vault.remove('access');
+            if(previousRefresh)await this.vault.set('oauth-refresh',previousRefresh);
+            else await this.vault.remove('oauth-refresh');
+            throw error;
+          }
           return;
         }
         if(keep&&valid()){
           await this.vault.set('oauth-refresh',keep);
           if(!valid()) {await this.vault.remove('oauth-refresh');throw new XIssue('ACCESS_DENIED');}
+          commit();
           this.store.set(`${this.id}:oauth`,{clientId:grant.clientId,following:grant.following,likes:grant.likes,accountId,scope,next:now+(this.syncPending(accountId)?minute:day)} satisfies OAuthSettings);
         } else if(this.store.value<OAuthSettings|null>(`${this.id}:oauth`,null)) {
           this.store.run(`DELETE FROM settings WHERE key='${this.id}:oauth'`);
           await this.vault.remove('oauth-refresh');
         }
+        if(!keep&&valid())commit();
       });
-    } catch {throw new ApiError(503,'OAUTH_FAILED','X could not verify the selected account signals.');}
+    } catch(error) {
+      if(error instanceof ApiError)throw error;
+      if(error instanceof XIssue)throw new ApiError(503,error.code,issueText[error.code]);
+      throw new ApiError(503,'OAUTH_FAILED','X could not verify the selected account signals.');
+    }
     finally {this.changed();}
   }
-  private async syncSignals(consent:SignalConsent,scope:string,access:string,now:number,signal:AbortSignal,valid:()=>unknown,expected?:string) {
-    const own=z.object({data:userSchema}).parse(await this.get('users/me',new URLSearchParams(),now,1,signal,access)).data;
+  private async syncSignals(consent:SignalConsent,scope:string,access:string,now:number,signal:AbortSignal,valid:()=>unknown,expected?:string,defer=false) {
+    const own=z.object({data:userSchema}).parse(await this.get('users/me',new URLSearchParams(),now,1,signal,{delegated:access})).data;
     if(expected&&own.id!==expected)throw new XIssue('ACCESS_DENIED');
     const scopes=scope.split(/\s+/), revoked=new Set<string>(),missingSignals:string[]=[];
     const sets:{kind:string;authors:Set<string>;progress:SignalProgress;success:boolean}[]=[];
@@ -444,7 +525,7 @@ export class XApi implements LiveCollector {
             data:z.array(z.object({id:tweetId,author_id:tweetId.optional()})).optional(),
             meta:z.object({next_token:z.string().max(4096).optional()}).optional(),
             errors:z.array(z.unknown()).optional(),
-          }).parse(await this.get(`users/${own.id}/${flag.path}`,params,now,limit,signal,access));
+          }).parse(await this.get(`users/${own.id}/${flag.path}`,params,now,limit,signal,{delegated:access}));
           for(const post of result.data??[]) {
             if(flag.path==='following')authors.add(post.id);
             else if(post.author_id)authors.add(post.author_id);
@@ -455,7 +536,7 @@ export class XApi implements LiveCollector {
           next=followingCursor;
           if(!next){complete=!result.errors?.length;break;}
         } catch(error) {
-          if(error instanceof XIssue&&['ACCESS_DENIED','CREDENTIAL_REQUIRED','SESSION_EXPIRED'].includes(error.code))revoked.add(flag.kind);
+          if(error instanceof XIssue&&['ACCESS_DENIED','CREDENTIAL_REQUIRED','INVALID_CREDENTIALS','SESSION_EXPIRED'].includes(error.code))revoked.add(flag.kind);
           if(next&&error instanceof XIssue&&error.code==='PAGE_INVALID')next=undefined;
           break;
         }
@@ -464,7 +545,7 @@ export class XApi implements LiveCollector {
       if(!complete&&!next)missingSignals.push(flag.kind);
     }
     if(!valid())throw new XIssue('ACCESS_DENIED');
-    this.store.db.transaction(()=>{
+    const commit=this.store.db.transaction(()=>{
       if(!expected){
         this.store.run('DELETE FROM account_relationships WHERE source_id=?',this.id);
         this.store.run('DELETE FROM settings WHERE key LIKE ?',`${this.id}:sync:%`);
@@ -485,8 +566,9 @@ export class XApi implements LiveCollector {
       this.store.set(`${this.id}:signals`,{verified,syncing:this.syncPending(own.id),partial:!!missingSignals.length,
         followingComplete:sets.some(r=>r.kind==='following'&&r.progress.complete),accountId:own.id,
         lastSuccess:success?now:prior?.lastSuccess??null,expires:success?now+day:prior?.expires??now});
-    })();
-    return own;
+    });
+    if(!defer)commit();
+    return {own,commit};
   }
   private syncPending(account:string) {
     return ['following','liked-author'].some(kind=>{
@@ -494,10 +576,10 @@ export class XApi implements LiveCollector {
       return !!(saved?.token||saved?.retry);
     });
   }
-  private async sessionToken(now:number,signal:AbortSignal) {
+  private async sessionToken(now:number,signal:AbortSignal,force=false) {
     const grant=this.account;
     if(!grant)throw new XIssue('CREDENTIAL_REQUIRED');
-    if(grant.expiresAt>now+30_000)return this.vault.get('access');
+    if(!force&&grant.expiresAt>now+30_000)return this.vault.get('access');
     if(!grant.renewable)throw new XIssue('SESSION_EXPIRED');
     if(!paid(this.store.settings))throw new XIssue('BUDGET_EXHAUSTED');
     const generation=this.row.generation,previous=await this.vault.get('oauth-refresh');
@@ -557,7 +639,7 @@ export class XApi implements LiveCollector {
         if(valid())this.store.set(`${this.id}:oauth`,{...config,scope,next:now+(this.syncPending(config.accountId)?minute:day)});
       } catch(error) {
         if(!valid())return;
-        if(error instanceof XIssue&&['ACCESS_DENIED','CREDENTIAL_REQUIRED','SESSION_EXPIRED'].includes(error.code)){
+        if(error instanceof XIssue&&['ACCESS_DENIED','CREDENTIAL_REQUIRED','INVALID_CREDENTIALS','SESSION_EXPIRED'].includes(error.code)){
           this.store.run('DELETE FROM account_relationships WHERE source_id=?',this.id);
           this.store.run('DELETE FROM settings WHERE key IN (?,?) OR key LIKE ?',`${this.id}:signals`,`${this.id}:oauth`,`${this.id}:sync:%`);
           this.store.run('UPDATE data_sources SET gap=? WHERE id=?','Personal authorization expired or was revoked. Reconnect from Data sources.',this.id);

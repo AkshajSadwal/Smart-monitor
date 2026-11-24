@@ -1,10 +1,12 @@
 {
   "name": "@monitor/desktop",
   "productName": "Smart Monitor",
+  "desktopName": "smart-monitor.desktop",
   "version": "0.1.0",
   "private": true,
   "main": "main.cjs",
   "description": "Local-first topic and post monitoring",
+  "homepage": "https://github.com/AkshajSadwal/Smart-monitor",
   "author": "Smart Monitor contributors",
   "scripts": {
     "start": "electron ."
@@ -50,7 +52,10 @@
       "category": "public.app-category.utilities"
     },
     "linux": {
+      "icon": "tray.png",
+      "syncDesktopName": true,
       "target": [
+        "AppImage",
         "deb",
         "rpm"
       ],
@@ -67,12 +72,12 @@
     "npmRebuild": true
   },
   "dependencies": {
-    "@fastify/static": "^8.0.0",
+    "@fastify/static": "^10.1.12",
     "@napi-rs/keyring": "^1.0.0",
     "better-sqlite3": "^12.0.0",
     "electron-updater": "^6.8.11",
     "fastify": "^5.0.0",
-    "node-notifier": "^10.0.1",
+    "node-notifier": "^12.1.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

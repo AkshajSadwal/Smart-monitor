@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import {createHash,randomUUID} from 'node:crypto';
 import {existsSync,rmSync} from 'node:fs';
-import { defaults,normalize,termKey,type Alert,type Candidate,type CollectionCoverage,type CollectorId,type Feedback,type Match,type Post,type Preferences,type Rule,type Settings,type Source,type Watchlist } from '../../packages/contracts/index';
+import { defaults,normalize,termKey,unknownMetrics,type Alert,type Candidate,type CollectionCoverage,type CollectorId,type Feedback,type Match,type Post,type Preferences,type Rule,type Settings,type Source,type Watchlist } from '../../packages/contracts/index';
 
 const migrations = [
   `
@@ -134,8 +134,11 @@ export class Store {
       try {
         if(backup)this.run('VACUUM INTO ?',backup);
         migrate();
-      } finally {
-        if(backup&&existsSync(backup))rmSync(backup);
+      } catch {
+        throw new Error(backup&&existsSync(backup)?'SQLite migration failed. The pre-migration backup remains beside the database.':'SQLite migration failed.');
+      }
+      if(backup&&existsSync(backup)){
+        try{rmSync(backup);}catch{ /* A completed migration is still usable if Windows holds the backup open. */ }
       }
       this.run("UPDATE notifications SET dispatch_state='unknown' WHERE dispatch_state='started'");
     } catch (error) {
@@ -150,7 +153,7 @@ export class Store {
   value<T>(key:string,fallback:T):T { const row=this.get<{value_json:string}>('SELECT value_json FROM settings WHERE key=?',key);return row?json<T>(row.value_json):fallback; }
   revision(key:string) { return this.get<{revision:number}>('SELECT revision FROM settings WHERE key=?',key)?.revision??0; }
   set(key:string,value:unknown) {this.run('INSERT INTO settings VALUES (?,?,1) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,revision=revision+1',key,JSON.stringify(value));}
-  get settings():Settings {return this.value('preferences',defaults);}
+  get settings():Settings {return {...defaults,...this.value<Partial<Settings>>('preferences',{})};}
   get paused() {return this.value('paused',true);}
   get sources() {return this.all<SourceRow>('SELECT * FROM data_sources ORDER BY id');}
   get active() {return this.get<SourceRow>('SELECT * FROM data_sources WHERE active=1')!;}
@@ -184,21 +187,24 @@ export class Store {
       handle:row.handle,displayName:row.display_name,language:row.language,createdAt:row.created_at,
       kind:row.kind,observedAt:row.last_seen_at,observation:row.observation,metrics:json(row.metrics_json)};
   }
-  post(row:PostRow,detail=false):Post {
+  post(row:PostRow,detail=false,now?:number):Post {
     const p=this.candidate(row);
     const [source,id]=[p.namespace,p.id];
     const saved=source==='x'?this.get<{metadata:string}>("SELECT metadata FROM post_display WHERE namespace='x' AND post_id=?",id):undefined;
-    const preview=saved?json<{shared?:string}>(saved.metadata).shared:undefined;
+    const display=saved?json<{shared?:string;lookupStatus?:string}>(saved.metadata):undefined;
+    const preview=display?.shared;
+    const stale=source==='x'&&now!==undefined&&row.verified_at!==null&&row.verified_at<now-24*60*60_000;
     const provenance=this.all<{collector:CollectorId}>('SELECT collector FROM post_sources WHERE namespace=? AND post_id=? ORDER BY observed_at DESC,collector',source,id).map(value=>value.collector);
     return {namespace:source,id,canonicalId:p.canonicalId,text:source==='mock'?p.text:preview??null,
-      preview:source==='mock'?'simulation':preview?'user-shared':p.text?'metadata':'unresolved',
+      preview:source==='mock'?'simulation':preview?'user-shared':stale?'stale':p.text?'metadata':'unresolved',
+      ...(!p.text&&display?.lookupStatus?{hydration:display.lookupStatus}:{}),
       authorId:p.authorId,handle:source==='mock'?p.handle:null,displayName:source==='mock'?p.displayName:null,
-      language:p.language,createdAt:p.createdAt,kind:p.kind,metrics:p.metrics,observedAt:p.observedAt,
+      language:stale?null:p.language,createdAt:stale?null:p.createdAt,kind:stale?'unknown':p.kind,metrics:stale?unknownMetrics:p.metrics,observedAt:p.observedAt,
       simulated:source==='mock',firstSeenAt:row.first_seen_at,originalUrl:canonicalUrl(source,id),
       collector:provenance[0],...(detail?{provenance}:{}),
       matches:this.matches(source,id).map(match=>detail?match:{...match,signals:[],unavailable:[],penalties:[]}),
       feedback:this.feedback(source,id),preferences:this.preferences(source,p.authorId),
-      ...(detail?{snapshots:this.all<{collected_at:number;metrics:string}>('SELECT collected_at,metrics FROM engagement_snapshots WHERE namespace=? AND post_id=? ORDER BY collected_at DESC LIMIT 20',source,id).map(s=>({collectedAt:s.collected_at,metrics:json(s.metrics)}))}:{})};
+      ...(detail?{snapshots:stale?[]:this.all<{collected_at:number;metrics:string}>('SELECT collected_at,metrics FROM engagement_snapshots WHERE namespace=? AND post_id=? ORDER BY collected_at DESC LIMIT 20',source,id).map(s=>({collectedAt:s.collected_at,metrics:json(s.metrics)}))}:{})};
   }
   matches(source:Source,id:string) {return this.all<{explanation:string}>('SELECT explanation FROM scores WHERE namespace=? AND post_id=? ORDER BY score DESC,list_id',source,id).map(row=>json<Match>(row.explanation));}
   feedback(source:Source,id:string):Feedback {
@@ -209,11 +215,21 @@ export class Store {
     const row=this.get<{muted:number;favorite:number}>('SELECT muted,favorite FROM author_preferences WHERE namespace=? AND author_id=?',source,author);
     return {muted:!!row?.muted,favorite:!!row?.favorite};
   }
+  removeX(id:string){
+    this.set('blocked:x:'+hash(id),true);
+    const authors=this.all<{author_id:string}>("SELECT DISTINCT author_id FROM posts WHERE namespace='x' AND author_id IS NOT NULL AND (id=? OR canonical_id=?)",id,id);
+    this.run("DELETE FROM monitoring_jobs WHERE namespace='x' AND post_id IN (SELECT id FROM posts WHERE namespace='x' AND (id=? OR canonical_id=?))",id,id);
+    this.run("UPDATE notifications SET post_id=NULL,reason='Post unavailable' WHERE namespace='x' AND (post_id=? OR canonical_id=?)",id,id);
+    this.run("DELETE FROM posts WHERE namespace='x' AND (id=? OR canonical_id=?)",id,id);
+    for(const author of authors)this.run("DELETE FROM authors WHERE namespace='x' AND id=? AND NOT EXISTS (SELECT 1 FROM posts WHERE namespace='x' AND author_id=?)",author.author_id,author.author_id);
+  }
+  blockedX(id:string){return this.value('blocked:x:'+hash(id),false);}
   provenance(p:Candidate) {
     this.run('INSERT INTO post_sources VALUES (?,?,?,?) ON CONFLICT(namespace,post_id,collector) DO UPDATE SET observed_at=max(observed_at,excluded.observed_at)',
       p.namespace,p.id,p.collector??p.namespace,p.observedAt);
   }
   persist(p:Candidate,now:number) {
+    if(p.namespace==='x'&&(this.blockedX(p.id)||(p.canonicalId!==p.id&&this.blockedX(p.canonicalId))))return false;
     if (this.get('SELECT 1 FROM engagement_snapshots WHERE namespace=? AND post_id=? AND observation=?',p.namespace,p.id,p.observation)) {
       this.provenance(p);
       return false;

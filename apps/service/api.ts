@@ -16,10 +16,10 @@ import {selectedPost,type WebsiteSession} from './website-session';
 function capabilities(id:SourceInfo['id'],access:SourceCapability['state'],lookup:SourceCapability['state'],stream:boolean,website:string,delivery?:string):SourceCapability[] {
   if(id==='mock')return [{label:'Simulated search and engagement',state:'Available'},{label:'Simulated full previews',state:'Available'}];
   if(id==='hosted')return [
-    {label:'Shared public-topic delivery',state:delivery==='simulated'||delivery==='ids'||delivery==='approved-public'?'Available':access},
+    {label:'Shared public-topic delivery',state:['simulated','ids','metadata','approved-public'].includes(delivery??'')?'Available':access},
     {label:'VM authenticated website session',state:'Unsupported'},
-    {label:'Live redistribution',state:delivery==='approved-public'?'Limited':delivery==='ids'?'Limited':'Permission required',
-      detail:delivery==='approved-public'?'Operator-authorized topic delivery with local post links.':delivery==='ids'?'Post IDs and links only.':'Depends on the operator’s X authorization.'},
+    {label:'Live redistribution',state:['ids','metadata','approved-public'].includes(delivery??'')?'Limited':'Permission required',
+      detail:delivery==='approved-public'?'Operator-authorized topic delivery with local post links.':delivery==='metadata'?'Allowed counters and timestamps. Local text lookup is optional.':delivery==='ids'?'Post IDs and links only.':'Depends on the operator’s X authorization.'},
   ];
   return [
     {label:id==='session'?'Official OAuth recent search':'App-only recent search',state:access,detail:'X credentials, endpoint entitlement and a configured budget are required.'},
@@ -50,7 +50,7 @@ export function createApi(monitor:Monitor,options:{
   clearSignals?:()=>Promise<void>;
   authorize?:(input:unknown,origin:string)=>Promise<{url:string}>;
   callback?:(url:string,origin:string)=>Promise<void>;
-  check?:()=>Promise<void>;
+  check?:()=>Promise<unknown>;
   official?:XApi;
   localAccount?:XApi;
   website?:WebsiteSession;
@@ -142,6 +142,24 @@ export function createApi(monitor:Monitor,options:{
     monitor.invalidate();
     await options.hosted.credential(value);
     return {updated:true};
+  });
+  api.post('/api/control/verify-x',async req=>{
+    const {source,capCents}=z.strictObject({source:z.enum(['x','session']),capCents:z.number().int().min(1).max(100),confirm:z.literal(true)}).parse(req.body);
+    if(!store.paused)throw new ApiError(409,'PAUSE_REQUIRED','Pause monitoring before running the one-page live acceptance probe.');
+    const collector=source==='x'?options.official:options.localAccount;
+    if(!collector)throw missing();
+    return collector.check(capCents);
+  });
+  api.post('/api/control/verify-hosted',req=>{
+    z.strictObject({confirm:z.literal(true)}).parse(req.body);
+    if(!options.hosted)throw missing();
+    return options.hosted.verifySimulation();
+  });
+  api.post('/api/control/purge-x',req=>{
+    const {id}=z.strictObject({id:z.string().regex(/^\d{1,25}$/)}).parse(req.body);
+    store.db.transaction(()=>store.removeX(id))();
+    monitor.signal('posts.changed','notifications.changed','overview.changed');
+    return {removed:true};
   });
   api.post('/api/v1/session',(req,res)=>{
     const {nonce:key}=z.strictObject({nonce:z.string().length(43)}).parse(req.body);
@@ -245,10 +263,12 @@ export function createApi(monitor:Monitor,options:{
     }
     const rows=store.all<PostRow & {sort_value:number}>(`${postSelect.replace('SELECT p.*,','SELECT p.*,'+sort+' AS sort_value,')} WHERE ${checks.join(' AND ')} ORDER BY sort_value DESC,p.id DESC LIMIT ?`,...values,query.limit+1);
     const page=rows.slice(0,query.limit),last=page.at(-1);
-    return {items:page.map(row=>store.post(row)),cursor:rows.length>query.limit&&last?Buffer.from(JSON.stringify({key,value:last.sort_value,id:last.id})).toString('base64url'):null};
+    const now=monitor.clock();
+    return {items:page.map(row=>store.post(row,false,now)),cursor:rows.length>query.limit&&last?Buffer.from(JSON.stringify({key,value:last.sort_value,id:last.id})).toString('base64url'):null};
   });
   api.post('/api/v1/posts/share',(req,res)=>{
     const now=monitor.clock(),post=selectedPost(req.body,now);
+    if(store.blockedX(post.id))throw missing();
     const row=store.db.transaction(()=>{
       if(store.row('x',post.id))store.provenance(post);
       else store.persist({...post,text:''},now);
@@ -257,13 +277,26 @@ export function createApi(monitor:Monitor,options:{
       return store.row('x',post.id)!;
     })();
     monitor.signal('posts.changed');
-    return res.status(201).send(store.post(row));
+    return res.status(201).send(store.post(row,false,now));
+  });
+  api.get('/api/v1/embed/x/:id',(req,res)=>{
+    const {id}=z.object({id:z.string().regex(/^\d{1,25}$/)}).parse(req.params);
+    if(!store.settings.officialEmbeds||req.headers['sec-fetch-dest']!=='iframe'||!store.row('x',id))throw missing();
+    res.header('X-Frame-Options','SAMEORIGIN').header('Content-Security-Policy',[
+      "default-src 'none'","sandbox allow-scripts","frame-ancestors 'self'","base-uri 'none'",
+      "script-src https://platform.twitter.com","frame-src https://platform.twitter.com https://syndication.twitter.com",
+      "connect-src https://platform.twitter.com https://syndication.twitter.com",
+      "style-src 'unsafe-inline'","img-src https://pbs.twimg.com https://platform.twitter.com",
+    ].join('; '));
+    return res.type('text/html').send(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Official X post</title>
+      <blockquote class="twitter-tweet" data-dnt="true"><a href="https://x.com/i/web/status/${id}">View post on X</a></blockquote>
+      <script async src="https://platform.twitter.com/widgets.js" charset="utf-8"></script></html>`);
   });
   api.get('/api/v1/posts/:namespace/:id',req=>{
     const {namespace,id}=itemParams.parse(req.params);
     const row=store.row(namespace,id);
     if (!row) throw missing();
-    return store.post(row,true);
+    return store.post(row,true,monitor.clock());
   });
   api.put('/api/v1/posts/:namespace/:id/feedback',req=>{
     const {namespace,id}=itemParams.parse(req.params);
@@ -312,7 +345,13 @@ export function createApi(monitor:Monitor,options:{
     monitor.signal('notifications.changed','overview.changed');
     return {updated:result.changes};
   });
-  api.post('/api/v1/notifications/test',async()=>({result:await monitor.notify({title:'Smart Monitor · Test',message:'Your local notification channel is available.'})}));
+  let lastNotificationTest:number|undefined;
+  api.post('/api/v1/notifications/test',async()=>{
+    const now=monitor.clock();
+    if(lastNotificationTest!==undefined&&now-lastNotificationTest<5000)throw new ApiError(429,'TEST_COOLDOWN','Wait five seconds before testing again.');
+    lastNotificationTest=now;
+    return {result:await monitor.notify({title:'Smart Monitor · Test',message:'Check that this notification appeared on your system.'})};
+  });
   api.get('/api/v1/settings',()=>({...store.settings,revision:store.revision('preferences')}));
   api.patch('/api/v1/settings',req=>{
     revision(req,store.revision('preferences'));
@@ -356,7 +395,7 @@ export function createApi(monitor:Monitor,options:{
       const signals=store.value<{verified:string[];expires:number;syncing?:boolean;lastSuccess?:number;partial?:boolean;followingComplete?:boolean}|null>(row.id+':signals',null);
       const session=row.id==='session'?options.localAccount?.account:undefined;
       const website=options.website?.state.status??'Permission required';
-      const access:SourceCapability['state']=!row.configured||['SESSION_EXPIRED','CREDENTIAL_REQUIRED','VERIFICATION_REQUIRED'].includes(row.error_code??'')?'Authentication required':
+      const access:SourceCapability['state']=!row.configured||['SESSION_EXPIRED','CREDENTIAL_REQUIRED','INVALID_CREDENTIALS','VERIFICATION_REQUIRED'].includes(row.error_code??'')?'Authentication required':
         row.error_code==='ACCESS_DENIED'?'Permission required':(row.last_success_at||store.value(row.id+':search-verified',false))?'Available':'Unverified';
       const features=capabilities(row.id,access,store.value<SourceCapability['state']>(row.id+':lookup-state',access==='Authentication required'?access:'Unverified'),
         row.status==='Streaming',website,options.hosted?.diagnostics?.delivery);
@@ -377,7 +416,11 @@ export function createApi(monitor:Monitor,options:{
         features,coverage:store.coverage(row.id),personalSync,
         capabilities:[...(monitor.sources.get(row.id)?.capabilities??[]),
           ...(signals&&signals.expires>now?signals.verified.map(s=>s==='following'?'Following signals available':'Liked-author signals available'):[])],
-        ...(x?{options:x.settings,syncing:signals?.syncing??false}:{}),
+        ...(x?{options:x.settings,syncing:signals?.syncing??false,budget:{
+          reservedUsdMicros:store.value('usage:cost:'+day,(usage?.resources??0)*store.settings.maxResourceUsdMicros),
+          dailyUsdCents:store.settings.dailyUsdCents,
+          searchPageUsdMicros:store.settings.maxResourceUsdMicros?x.settings.pageSize*2*store.settings.maxResourceUsdMicros:null,
+        }}:{}),
         ...(session?{account:session.username,expiresAt:session.expiresAt}:{}),
         ...(row.id==='hosted'?{hosted:options.hosted?.diagnostics,publicTopics}:{}),
         projectedRequests:x?Math.ceil(86400/store.settings.intervalSeconds)*Math.min(12,groupCount)*x.settings.pages:0,
@@ -406,11 +449,11 @@ export function createApi(monitor:Monitor,options:{
   api.post('/api/v1/sources/:id/check',async(req,res)=>{
     const {id}=choice.parse(req.params);
     if (id==='x') {
-      if (store.active.id!=='x' || !paid(store.settings) || !options.check) throw new ApiError(409,'SOURCE_NOT_READY','Activate the configured and budgeted X source first.');
+      if (!options.check) throw missing();
       await options.check();
     }
     if(id==='session'){
-      if(store.active.id!=='session'||!options.localAccount)throw new ApiError(409,'SOURCE_NOT_READY','Select and authorize Local X Account first.');
+      if(!options.localAccount)throw missing();
       await options.localAccount.check();
     }
     if(id==='hosted'){
@@ -515,5 +558,5 @@ export function createApi(monitor:Monitor,options:{
   return {api,setOrigin:(value:string)=>{origin=value;},clearSessions:()=>{sessions.clear();bootstrap.clear();}};
 }
 
-export const paid=(s:Settings)=>s.consoleBudgetConfirmed&&s.dailyRequests>0&&s.dailyResources>0;
+export const paid=(s:Settings)=>s.consoleBudgetConfirmed&&s.dailyRequests>0&&s.dailyResources>0&&s.dailyUsdCents>0&&s.maxResourceUsdMicros>0;
 export {defaults};

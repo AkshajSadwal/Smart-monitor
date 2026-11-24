@@ -96,6 +96,7 @@ export class Monitor {
       if (signal.aborted) return;
       if (success) this.success(source,now,next);
       else if (this.store.value(`next:${source}`,0)<=now) this.store.set(`next:${source}`,next);
+      if(source==='hosted'&&!signal.aborted)await this.hydrateHosted(lists,now,signal);
       if(success&&!signal.aborted&&collector.refreshSignals){
         const key=source+':signals',before=this.store.value(key,null);
         await collector.refreshSignals(now,signal);
@@ -114,9 +115,34 @@ export class Monitor {
     if (signal.aborted) return;
     for (const job of this.store.jobs('alert',source,now)) {
       if (signal.aborted || this.store.paused) break;
-      const alert=this.store.db.transaction(()=>this.decide(job.namespace,job.post_id,job.id,now,settings,job.due_at))();
+      const alert=this.store.db.transaction(()=>this.decide(job.namespace,job.post_id,job.id,now,settings,lists,job.due_at))();
       if (alert) this.deliver(alert);
     }
+  }
+  private async hydrateHosted(lists:Watchlist[],now:number,signal:AbortSignal){
+    if(!this.store.settings.hydrateHosted)return;
+    const x=this.sources.get('x');
+    if(!x?.hydrate)return;
+    const ids=this.store.all<{id:string}>(`SELECT p.id FROM posts p
+      JOIN post_sources s ON s.namespace=p.namespace AND s.post_id=p.id AND s.collector='hosted'
+      LEFT JOIN post_display d ON d.namespace=p.namespace AND d.post_id=p.id
+      WHERE p.namespace='x' AND p.text IS NULL AND p.first_seen_at>? AND coalesce(json_extract(d.metadata,'$.lookupAt'),0)<?
+      ORDER BY p.first_seen_at DESC,p.id LIMIT 10`,now-24*60*minute,now-30*minute).map(row=>row.id);
+    if(!ids.length)return;
+    const {posts,removed,status}=await x.hydrate(ids,now,signal);
+    if(signal.aborted||this.store.active.id!=='hosted'||this.store.paused)return;
+    this.store.db.transaction(()=>{
+      this.store.set('hosted:hydration',status);
+      for(const id of ids)this.store.run("INSERT INTO post_display VALUES ('x',?,json_object('lookupAt',?,'lookupStatus',?)) ON CONFLICT(namespace,post_id) DO UPDATE SET metadata=json_set(post_display.metadata,'$.lookupAt',?,'$.lookupStatus',?)",
+        id,now,status,now,status);
+      for(const id of removed)this.store.removeX(id);
+      for(const post of posts){
+        const original=this.store.row('x',post.id);
+        if(!original)continue;
+        this.ingest({...post,collector:'hosted'},lists,now,false,now-original.first_seen_at>10*minute);
+        this.store.provenance({...post,collector:'x'});
+      }
+    })();
   }
   private commit(source:CollectorId,lists:Watchlist[],signal:AbortSignal):CommitPage {
     return (posts,historical,key,state)=>{
@@ -259,9 +285,7 @@ export class Monitor {
     this.store.db.transaction(()=>{
       for (const id of growth.removed) {
         if(source!=='x'&&source!=='session')continue;
-        this.store.run("DELETE FROM post_sources WHERE namespace='x' AND post_id=? AND collector=?",id,source);
-        const dropped=this.store.run("DELETE FROM posts WHERE namespace='x' AND id=? AND NOT EXISTS (SELECT 1 FROM post_sources s WHERE s.namespace='x' AND s.post_id=posts.id)",id);
-        if(dropped.changes)this.store.run("UPDATE notifications SET post_id=NULL,reason='Post unavailable' WHERE namespace='x' AND post_id=?",id);
+        this.store.removeX(id);
       }
       for (const job of jobs) {
         const pending=inputs.some(input=>input.job.id===job.id);
@@ -272,7 +296,7 @@ export class Monitor {
     })();
     this.signal('posts.changed','overview.changed');
   }
-  private decide(source:Source,id:string,jobId:string,now:number,settings:Settings,due:number) {
+  private decide(source:Source,id:string,jobId:string,now:number,settings:Settings,lists:Watchlist[],due:number) {
     const row=this.store.row(source,id);
     this.store.run('DELETE FROM monitoring_jobs WHERE id=?',jobId);
     if (!row?.text || this.store.get('SELECT 1 FROM notifications WHERE namespace=? AND canonical_id=?',source,row.canonical_id)) return;
@@ -286,7 +310,7 @@ export class Monitor {
     const matches=this.store.matches(source,id).sort((a,b)=>priorities[b.classification]-priorities[a.classification]||b.score-a.score||a.listId.localeCompare(b.listId));
     for (const match of matches) {
       if (match.classification==='silent') continue;
-      const list=this.store.lists.find(l=>l.id===match.listId);
+      const list=lists.find(l=>l.id===match.listId);
       const last=this.store.get<{value:number}>('SELECT value FROM notification_limits WHERE key=?',match.listId)?.value;
       const suppression=policy??(!list?.enabled||list.revision!==match.revision?'Watchlist changed':
         (last!==undefined&&now-last<list.cooldownSeconds*1000?'Watchlist cooldown':match.suppression));
@@ -296,9 +320,10 @@ export class Monitor {
       }
       const key=randomUUID();
       const reason=match.previousScore===undefined ? `Matched ${match.listName}` : `Popularity score rose from ${match.previousScore} to ${match.score}`;
-      this.store.run('INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',key,source,row.canonical_id,id,match.listId,match.listName,now,day,match.classification,match.score,reason,null,settings.nativeNotifications?'started':'disabled',this.store.active.id);
+      const native=settings.nativeNotifications&&(source!=='mock'||settings.simulatedNotifications);
+      this.store.run('INSERT INTO notifications VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',key,source,row.canonical_id,id,match.listId,match.listName,now,day,match.classification,match.score,reason,null,native?'started':'disabled',this.store.active.id);
       this.store.run('INSERT INTO notification_limits VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',match.listId,now);
-      return {key,source,id,reason,native:settings.nativeNotifications};
+      return {key,source,id,reason,native};
     }
     this.signal('posts.changed');
   }
@@ -329,6 +354,7 @@ export class Monitor {
       this.store.run('DELETE FROM account_relationships WHERE expires_at<?',now);
       this.store.run("UPDATE posts SET text=NULL,content_hash=NULL WHERE rowid IN (SELECT rowid FROM posts WHERE namespace='x' AND verified_at<? AND text IS NOT NULL LIMIT 250)",now-24*60*minute);
       this.store.run('DELETE FROM usage_buckets WHERE day<?',new Date(cutoff).toISOString().slice(0,10));
+      this.store.run("DELETE FROM settings WHERE key LIKE 'usage:cost:%' AND key<?",'usage:cost:'+new Date(cutoff).toISOString().slice(0,10));
       const cutoffDate=new Date(cutoff).toISOString().slice(0,10);
       this.store.run("DELETE FROM notification_limits WHERE (key LIKE 'cap:%' AND key<?) OR (key NOT LIKE 'cap:%' AND value<?)",'cap:'+cutoffDate,cutoff);
     })();

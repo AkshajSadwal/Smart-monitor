@@ -11,7 +11,7 @@ import {Monitor} from '../apps/service/monitor';
 import {XApi,type Vault} from '../apps/service/x-api';
 
 const fixtureNow=Date.parse('2026-01-12T12:00:00Z');
-const settings={...defaults,consoleBudgetConfirmed:true,dailyRequests:60,dailyResources:2000,nativeNotifications:false};
+const settings={...defaults,consoleBudgetConfirmed:true,dailyRequests:60,dailyResources:2000,dailyUsdCents:5000,maxResourceUsdMicros:10000,nativeNotifications:false};
 const rule=watchlist.parse({name:'sqlite',terms:[{direction:'include',kind:'word',text:'SQLite'}],standard:0,immediate:0,cooldownSeconds:0});
 const json=(value:unknown,status=200,headers:HeadersInit={})=>new Response(JSON.stringify(value),{status,headers});
 const item:Candidate={namespace:'x',id:'110000000000000001',canonicalId:'110000000000000001',text:'SQLite update',authorId:'42',
@@ -119,7 +119,7 @@ test('official stream normalizes frames without a polling interval and stops on 
       return new Response('\r\n'+JSON.stringify({data:{id:item.id,text:item.text}})+'\r\n');
     };
     const x=new XApi(store,{...vault().driver,get:async()=> 'fixture-bearer'},transport);
-    x.configure({pages:2,pageSize:10,recoveryHours:1,stream:true});
+    x.configure({pages:2,pageSize:10,recoveryHours:1,stream:true,streamBudgetConfirmed:true});
     const posts:Candidate[]=[];
     const signal=new AbortController().signal;
     await x.stream([],signal,items=>posts.push(...items));
@@ -243,10 +243,10 @@ test('hosted live publication fails closed, encrypts credentials, and strips res
     const encrypted=(store.db.prepare('SELECT cipher FROM secret').get() as {cipher:string}).cipher;
     assert.ok(!encrypted.includes('operator-fixture-secret'));
     const support=store.issue('fixture',fixtureNow);
-    const x=createHostedService(store,{mode:'ids',clock:()=>fixtureNow,permission:'fixture',bearer:store.getBearer(key),dailyRequests:5,dailyResources:100,
+    const x=createHostedService(store,{mode:'ids',clock:()=>fixtureNow,permission:'fixture',bearer:store.getBearer(key),dailyRequests:5,dailyResources:100,dailyUsdCents:5000,maxResourceUsdMicros:10000,
       transport:async()=>json({data:[{id:item.id,text:'restricted-body',author_id:'1',public_metrics:{like_count:55}}],includes:{users:[{id:'1',name:'External'}]}})});
     try{
-      assert.equal((await x.app.inject({method:'PUT',url:'/v1/subscriptions',headers:{Authorization:'Bearer '+support.token},payload:{topics:['sqlite']}})).statusCode,200);
+      assert.equal((await x.app.inject({method:'PUT',url:'/v1/subscriptions',headers:{Authorization:'Bearer '+support.token},payload:{topics:['sqlite'],liveTermsAccepted:true}})).statusCode,200);
       await x.tick();
       const payload=(store.db.prepare('SELECT payload FROM events').get() as {payload:string}).payload;
       assert.ok(!payload.includes('restricted-body'));

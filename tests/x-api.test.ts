@@ -36,7 +36,7 @@ test('safe queries, no paid request without a budget, and resource reservation',
     assert.deepEqual(queryGroups({...rule,terms:[{direction:'include',kind:'phrase',text:'" OR from:someone',important:false}]}),[]);
     assert.equal(await collector.collect([rule],now,new AbortController().signal,commit),false);
     assert.equal(calls,0);
-    store.set('preferences',{...defaults,consoleBudgetConfirmed:true,dailyRequests:1,dailyResources:20});
+    store.set('preferences',{...defaults,consoleBudgetConfirmed:true,dailyRequests:1,dailyResources:20,dailyUsdCents:5000,maxResourceUsdMicros:10000});
     assert.equal(await collector.collect([rule],now,new AbortController().signal,commit),true);
     const row=store.row('x','90071992547409931')!;
     assert.equal(store.post(row).metrics.likes,0);
@@ -51,7 +51,7 @@ test('safe queries, no paid request without a budget, and resource reservation',
 
 test('partial frozen pages survive a rate reset and preserve numeric IDs as strings',async()=>{
   const {store,rule,commit}=setup();
-  store.set('preferences',{...defaults,consoleBudgetConfirmed:true,dailyRequests:10,dailyResources:200});
+  store.set('preferences',{...defaults,consoleBudgetConfirmed:true,dailyRequests:10,dailyResources:200,dailyUsdCents:5000,maxResourceUsdMicros:10000});
   const requests:URL[]=[];
   const transport:typeof fetch=async input=>{
     requests.push(new URL(String(input)));
@@ -77,7 +77,7 @@ test('partial frozen pages survive a rate reset and preserve numeric IDs as stri
 test('terminal denial, bad OAuth state, and capability cleanup',async()=>{
   const {store,rule,commit}=setup();
   let removed=false;
-  store.set('preferences',{...defaults,consoleBudgetConfirmed:true,dailyRequests:10,dailyResources:200});
+  store.set('preferences',{...defaults,consoleBudgetConfirmed:true,dailyRequests:10,dailyResources:200,dailyUsdCents:5000,maxResourceUsdMicros:10000});
   store.run("UPDATE data_sources SET vault_ref='bearer' WHERE id='x'");
   const collector=new XApi(store,{...vault,remove:async()=>{removed=true;}},async()=>json({},403));
   try {
@@ -110,7 +110,7 @@ test('OAuth consent uses PKCE and stores only optional refresh credentials in th
     if(url.pathname==='/2/users/42/liked_tweets')return json({data:[{id:'9',author_id:'321'}]});
     throw new Error('Unexpected fixture URL');
   };
-  store.set('preferences',{...defaults,consoleBudgetConfirmed:true,dailyRequests:10,dailyResources:200});
+  store.set('preferences',{...defaults,consoleBudgetConfirmed:true,dailyRequests:10,dailyResources:200,dailyUsdCents:5000,maxResourceUsdMicros:10000});
   const client=new XApi(store,{get:async key=>memory.get(key)??null,set:async(key,value)=>{memory.set(key,value);},remove:async key=>{memory.delete(key);}},transport);
   try {
     const origin='http://127.0.0.1:12345';

@@ -7,9 +7,10 @@ export interface Collector {
   initialize?():Promise<void>;
   collect(lists:Watchlist[],now:number,signal:AbortSignal,commit:CommitPage):Promise<boolean>;
   lookup?(posts:Candidate[],now:number,signal:AbortSignal,attempts?:Map<string,number>):Promise<{posts:Candidate[];removed:string[]}>;
+  hydrate?(ids:string[],now:number,signal:AbortSignal):Promise<{posts:Candidate[];removed:string[];status:string}>;
   refreshSignals?(now:number,signal:AbortSignal):Promise<void>;
   stream?(lists:Watchlist[],signal:AbortSignal,commit:CommitPage):Promise<void>;
-  check?():Promise<void>;
+  check?():Promise<unknown>;
   disconnect?():Promise<void>;
   pause?():Promise<void>;
 }

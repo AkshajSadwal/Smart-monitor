@@ -6,7 +6,7 @@ export const topicSchema=z.string().trim().min(1).max(100)
   .transform(normalize)
   .refine(value=>/^[\p{L}\p{M}\p{N}_# .,'‘’!?+-]+$/u.test(value)&&/[\p{L}\p{N}]/u.test(value),'Use a public keyword, hashtag, or literal phrase.');
 export const topicsSchema=z.array(topicSchema).max(16).transform(topics=>[...new Set(topics)].sort());
-export const deliverySchema=z.enum(['disabled','simulated','ids','approved-public']);
+export const deliverySchema=z.enum(['disabled','simulated','ids','metadata','approved-public']);
 export type Delivery=z.infer<typeof deliverySchema>;
 export const hostedPost=z.strictObject({
   namespace:z.enum(['mock','x']),id:z.string().regex(/^[\w-]{1,100}$/),canonicalId:z.string().regex(/^[\w-]{1,100}$/),
@@ -15,10 +15,13 @@ export const hostedPost=z.strictObject({
   kind:kindSchema,metrics:metricsSchema,observedAt:z.number().int().nonnegative(),observation:z.string().max(200),
 }).refine(p=>p.namespace==='mock'||[p.id,p.canonicalId].every(id=>/^\d{1,25}$/.test(id)));
 export const hostedEvent=z.strictObject({
-  topic:topicSchema,delivery:z.enum(['simulated','ids','approved-public']),post:hostedPost,
-}).superRefine(({delivery,post},ctx)=>{
+  topic:topicSchema,delivery:z.enum(['simulated','ids','metadata','approved-public']),post:hostedPost,
+  resolution:z.enum(['unresolved','resolved']).optional(),
+}).superRefine(({delivery,post,resolution},ctx)=>{
   if((post.namespace==='mock')!==(delivery==='simulated')||(delivery==='ids'&&(post.text||post.authorId||post.handle||post.displayName||post.language||
-    post.createdAt!==null||Object.values(post.metrics).some(value=>value!==null))))ctx.addIssue({code:'custom',message:'Invalid hosted publication'});
+    post.createdAt!==null||Object.values(post.metrics).some(value=>value!==null)))||
+    (delivery==='metadata'&&(post.text||post.authorId||post.handle||post.displayName||post.language))||
+    (resolution!==undefined&&((resolution==='resolved')!==!!post.text)))ctx.addIssue({code:'custom',message:'Invalid hosted publication'});
 });
 export const hostedStatus=z.object({
   delivery:deliverySchema,serverTime:z.number().int().nonnegative(),

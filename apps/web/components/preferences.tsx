@@ -28,6 +28,10 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
         <dl className="fields"><div><dt>Requests reserved today</dt><dd>{s.requests}</dd></div><div><dt>Resources reserved today</dt><dd>{s.resources}</dd></div><div><dt>Projected requests per day</dt><dd>Up to {s.projectedRequests}</dd></div><div><dt>UTC budget resets</dt><dd>{timestamp(s.resetAt)}</dd></div></dl>
         <p className="subtle">Filtered Stream uses rules set in your developer app. Recent search also runs at the configured interval.</p>
       </>}
+      {s.budget&&<dl className="fields">
+        <div><dt>Estimated maximum per search page</dt><dd>{s.budget.searchPageUsdMicros===null?'Set a rate in Settings':usd(s.budget.searchPageUsdMicros)}</dd></div>
+        <div><dt>Estimated USD reserved today</dt><dd>{usd(s.budget.reservedUsdMicros)} of {usd(s.budget.dailyUsdCents*10_000)}</dd></div>
+      </dl>}
       {s.id==='session'&&<>
         <p className="subtle">Official OAuth uses X’s consent screen and your app’s API budget. Access and refresh tokens stay in the OS vault.</p>
         <dl className="fields"><div><dt>Account</dt><dd>{s.account?'@'+s.account:'—'}</dd></div><div><dt>OAuth token expires</dt><dd>{timestamp(s.expiresAt)}</dd></div></dl>
@@ -41,12 +45,13 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
         <p className="subtle">The VM receives approved public topics. Watchlist filters, X credentials, and personal ranking stay on this device.</p>
         {s.hosted&&<dl className="fields"><div><dt>Server</dt><dd>{s.hosted.origin}</dd></div><div><dt>Active subscriptions</dt><dd>{s.hosted.topics.join(', ')||'—'}</dd></div>
           <div><dt>Collection provider</dt><dd>{s.hosted.provider?label(s.hosted.provider):'Unverified'}</dd></div>
-          <div><dt>Delivery</dt><dd>{s.hosted.delivery==='ids'?'Post IDs and links only':s.hosted.delivery}</dd></div><div><dt>Latency estimate</dt><dd>{s.hosted.latencyMs===null?'—':s.hosted.latencyMs+' ms'}</dd></div></dl>}
+          <div><dt>Delivery</dt><dd>{s.hosted.delivery==='ids'?'Post IDs and links only':s.hosted.delivery}</dd></div><div><dt>Latency estimate</dt><dd>{s.hosted.latencyMs===null?'—':s.hosted.latencyMs+' ms'}</dd></div>
+          {s.hosted.hydration&&<div><dt>Local lookup</dt><dd>{s.hosted.hydration}</dd></div>}</dl>}
       </>}
       <div className="actions">
         <button className="button" disabled={s.active||busy||!s.configured} onClick={()=>void run(()=>request(`/sources/${s.id}/active`,'PUT'),`Selected ${collectorLabel[s.id]}.`)}>{s.active?'Selected':'Use source'}</button>
         {s.id==='mock'&&s.active&&<button className="button" disabled={busy} onClick={()=>void run(()=>request('/sources/mock/replay','POST'),'A fresh simulated timeline is queued.')}>Replay simulation</button>}
-        {s.id!=='mock'&&(s.active||s.id==='hosted')&&s.configured&&<button className="button" disabled={busy} onClick={()=>void run(()=>request(`/sources/${s.id}/check`,'POST'),'Connection checked.')}><RefreshCw size={15}/> Check connection</button>}
+        {s.id!=='mock'&&(s.id!=='hosted'||s.configured)&&<button className="button" disabled={busy} onClick={()=>void run(()=>request(`/sources/${s.id}/check`,'POST'),s.id==='hosted'?'Hosted connection checked.':'X credentials and recent search verified.')}><RefreshCw size={15}/> Check connection</button>}
         {s.id!=='mock'&&(s.configured||s.hosted)&&<button className="button" disabled={busy} onClick={()=>void run(()=>request(`/sources/${s.id}/disconnect`,'POST'),s.active?'Disconnected. Monitoring is paused.':'Disconnected.')}>Disconnect</button>}
         {s.id==='x'&&s.active&&<button className="button" disabled={busy} onClick={()=>{setOauthError('');setOauth('x');}}>Connect personal signals</button>}
         {s.id==='session'&&<button className="button" disabled={busy} onClick={()=>{setOauthError('');setFollows(false);setOauth('session');}}>{s.configured?'Reconnect official OAuth':'Connect official OAuth'}</button>}
@@ -96,6 +101,8 @@ export function CoverageFields({coverage}:{coverage?:CollectionCoverage}) {
   </dl>;
 }
 
+const usd=(micros:number)=>new Intl.NumberFormat(undefined,{style:'currency',currency:'USD',maximumFractionDigits:6}).format(micros/1_000_000);
+
 function SharePost({busy,close,run}:{busy:boolean;close:()=>void;run:Run}) {
   const [url,setUrl]=useState(''),[excerpt,setExcerpt]=useState(''),[consent,setConsent]=useState(false),[postId,setPostId]=useState('');
   return <Modal title="Share a selected X post" close={close}>
@@ -115,12 +122,13 @@ function SharePost({busy,close,run}:{busy:boolean;close:()=>void;run:Run}) {
 
 function HostedSetup({source,busy,close,run}:{source:SourceInfo;busy:boolean;close:()=>void;run:Run}) {
   const [origin,setOrigin]=useState(source.hosted?.origin??''),[consent,setConsent]=useState(false);
+  const [liveTermsAccepted,setLiveTermsAccepted]=useState(!!source.hosted?.liveTermsAccepted);
   const [topics,setTopics]=useState((source.hosted?.approvedTopics??[]).filter(topic=>source.publicTopics?.includes(topic)));
   const [error,setError]=useState('');
   return <Modal title="Configure Hosted Monitoring" close={close}>
     <form className="form-stack" onSubmit={e=>{e.preventDefault();void run(async()=>{
       setError('');
-      try{await request('/sources/hosted/config','PUT',{origin,topics,consent});close();}
+      try{await request('/sources/hosted/config','PUT',{origin,topics,consent,liveTermsAccepted});close();}
       catch(error){setError(error instanceof Error?error.message:'Hosted setup unavailable');}
     });}}>
       <label>Public HTTPS server URL<input type="url" required value={origin} onChange={e=>setOrigin(e.target.value)} placeholder="https://monitor.example.com"/></label>
@@ -132,6 +140,7 @@ function HostedSetup({source,busy,close,run}:{source:SourceInfo;busy:boolean;clo
         </label>)}
       </fieldset>
       <label className="check"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/> I consent to send these public topics to this server when Hosted Monitoring is active.</label>
+      <label className="check"><input type="checkbox" checked={liveTermsAccepted} onChange={e=>setLiveTermsAccepted(e.target.checked)}/> For live X delivery, I agree to the applicable X Terms of Service, Privacy Policy, Developer Agreement, and Developer Policy.</label>
       <p>Enter the VM-issued token in the local terminal using <code>npm run monitor -- hosted-credential set</code>. In the desktop app, use the tray's hosted credential action.</p>
       {error&&<p className="warning" role="alert">{error}</p>}
       <button className="button primary" type="submit" disabled={!origin||!topics.length||!consent||busy}>Approve hosted configuration</button>
@@ -145,7 +154,10 @@ function CollectionOptions({source,initial,busy,close,run}:{source:SourceInfo;in
       <label>Pages per query per cycle<input type="number" min={1} max={12} required value={draft.pages} onChange={e=>setDraft({...draft,pages:+e.target.value})}/></label>
       <label>Results per page<input type="number" min={10} max={100} required value={draft.pageSize} onChange={e=>setDraft({...draft,pageSize:+e.target.value})}/></label>
       <label>Recovery window in hours<input type="number" min={1} max={168} required value={draft.recoveryHours} onChange={e=>setDraft({...draft,recoveryHours:+e.target.value})}/></label>
-      {source.id==='x'&&<label className="check"><input type="checkbox" checked={draft.stream} onChange={e=>setDraft({...draft,stream:e.target.checked})}/> Enable Filtered Stream with my configured X rules and provider-side spending ceiling</label>}
+      {source.id==='x'&&<>
+        <label className="check"><input type="checkbox" checked={draft.stream} onChange={e=>setDraft({...draft,stream:e.target.checked})}/> Enable Filtered Stream with my configured X rules</label>
+        {draft.stream&&<label className="check"><input type="checkbox" checked={!!draft.streamBudgetConfirmed} onChange={e=>setDraft({...draft,streamBudgetConfirmed:e.target.checked})}/> My X provider enforces a hard spending limit for this stream</label>}
+      </>}
       <button className="button primary" type="submit" disabled={busy}>Save collection settings</button>
     </form>
   </Modal>;
@@ -155,6 +167,7 @@ type Preference = {namespace:Source;id:string;handle:string|null;muted:boolean;f
 export function SettingsPage({settings,run,busy}:{settings:ProfileSettings;run:Run;busy:boolean}) {
   const [draft,setDraft]=useState(settings),[important,setImportant]=useState(settings.importantTerms.join(', '));
   const [authors,setAuthors]=useState<Preference[]>([]),[feedback,setFeedback]=useState(''),[confirmation,setConfirmation]=useState('');
+  const [notificationTest,setNotificationTest]=useState('');
   const [erase,setErase]=useState<{nonce:string;profile:string;posts:number;lists:number}|null>(null),[erased,setErased]=useState(false);
   useEffect(()=>{void request<Preference[]>('/authors/preferences').then(setAuthors).catch(e=>setFeedback(e.message));},[]);
   const set=<K extends keyof Settings>(key:K,value:Settings[K])=>setDraft({...draft,[key]:value});
@@ -173,22 +186,34 @@ export function SettingsPage({settings,run,busy}:{settings:ProfileSettings;run:R
         <label>Polling interval (seconds)<input type="number" min={60} max={3600} value={draft.intervalSeconds} onChange={e=>set('intervalSeconds',+e.target.value)}/></label>
         <label>Daily notification cap<input type="number" min={0} max={1000} value={draft.dailyCap} onChange={e=>set('dailyCap',+e.target.value)}/></label>
         <label className="check"><input type="checkbox" checked={draft.nativeNotifications} onChange={e=>set('nativeNotifications',e.target.checked)}/> Desktop notifications</label>
+        <label className="check"><input type="checkbox" checked={draft.simulatedNotifications} onChange={e=>set('simulatedNotifications',e.target.checked)}/> Allow desktop notifications for simulated posts</label>
         <label className="check"><input type="checkbox" checked={draft.quiet.enabled} onChange={e=>set('quiet',{...draft.quiet,enabled:e.target.checked})}/> Enable quiet hours</label>
         <label>Quiet hours start<input type="time" required value={draft.quiet.start} onChange={e=>set('quiet',{...draft.quiet,start:e.target.value})}/></label>
         <label>Quiet hours end<input type="time" required value={draft.quiet.end} onChange={e=>set('quiet',{...draft.quiet,end:e.target.value})}/></label>
         <label>IANA time zone<input required value={draft.quiet.zone} onChange={e=>set('quiet',{...draft.quiet,zone:e.target.value})}/></label>
-      </div></section>
+      </div><button type="button" className="button" disabled={busy} onClick={()=>void run(async()=>{
+        setNotificationTest('');
+        const {result}=await request<{result:string}>('/notifications/test','POST');
+        setNotificationTest(result==='submitted'?'Submitted to the operating system. Check that the notification appeared.':'The operating system did not accept the test notification.');
+      })}>Send test notification</button>
+      {notificationTest&&<p role="status">{notificationTest}</p>}
+      <p className="subtle">If you don’t see a banner, check the system’s notification permission for Smart Monitor and turn off Do Not Disturb temporarily.</p></section>
       <section className="panel form-stack"><h2>Relevance weights</h2><div className="form-grid">{Object.entries(draft.weights).map(([key,value])=><label key={key}>{label(key)}<input type="number" min={key==='term'?1:0} max={100} value={value} onChange={e=>set('weights',{...draft.weights,[key]:+e.target.value})}/></label>)}</div>
         <label>Important terms, separated by commas<input value={important} onChange={e=>setImportant(e.target.value)}/></label>
       </section>
-      <section className="panel form-stack"><h2>Live API budget</h2><p className="subtle">The monitor reserves resources before each request. Confirm a monthly spending limit in the X Developer Console before enabling paid traffic.</p><div className="form-grid">
+      <section className="panel form-stack"><h2>Live API budget</h2><p className="subtle">Copy the highest applicable rate from your X Developer Console, including user expansions and OAuth reads. Reserved estimates are separate from actual X billing.</p><div className="form-grid">
         <label>Daily request ceiling<input type="number" min={0} max={5000} value={draft.dailyRequests} onChange={e=>set('dailyRequests',+e.target.value)}/></label>
-        <label>Daily resource ceiling<input type="number" min={0} max={100000} value={draft.dailyResources} onChange={e=>set('dailyResources',+e.target.value)}/></label></div>
+        <label>Daily resource ceiling<input type="number" min={0} max={100000} value={draft.dailyResources} onChange={e=>set('dailyResources',+e.target.value)}/></label>
+        <label>Daily spending ceiling (US cents)<input type="number" min={0} max={1000000} value={draft.dailyUsdCents} onChange={e=>set('dailyUsdCents',+e.target.value)}/></label>
+        <label>Maximum price per resource (millionths of USD)<input type="number" min={0} max={10000000} value={draft.maxResourceUsdMicros} onChange={e=>set('maxResourceUsdMicros',+e.target.value)}/></label></div>
+        <p className="subtle">Current input equals {usd(draft.maxResourceUsdMicros)} per resource. Leave budgets at zero if a price cannot be bounded.</p>
+        <label className="check"><input type="checkbox" checked={draft.hydrateHosted} onChange={e=>set('hydrateHosted',e.target.checked)}/> Use my local X API budget to look up unresolved Hosted posts</label>
         <label className="check"><input type="checkbox" checked={draft.consoleBudgetConfirmed} onChange={e=>set('consoleBudgetConfirmed',e.target.checked)}/> I set a spending limit in the X Developer Console</label>
       </section>
       <section className="panel form-stack"><h2>Application and local data</h2><div className="form-grid">
         <label>Retention (days)<input type="number" min={1} max={90} value={draft.retentionDays} onChange={e=>set('retentionDays',+e.target.value)}/></label>
         <label className="check"><input type="checkbox" checked={draft.reduceMotion} onChange={e=>set('reduceMotion',e.target.checked)}/> Reduce motion</label></div>
+        <label className="check"><input type="checkbox" checked={draft.officialEmbeds} onChange={e=>set('officialEmbeds',e.target.checked)}/> Offer official X embeds on request, where authorized</label>
         <p className="subtle">Login launch is managed through the packaged desktop tray.</p>
         <div><button className="button primary" type="submit" disabled={busy}>Save settings</button></div>
       </section>
