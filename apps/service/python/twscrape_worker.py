@@ -19,6 +19,8 @@ REQUEST_KEY = "twscrape:requests"
 HOLD_KEY = "twscrape:hold"
 HOUR = 3_600_000
 DAY = 24 * HOUR
+HOURLY_LIMIT = 60
+DAILY_LIMIT = 600
 
 
 def package_status():
@@ -36,8 +38,9 @@ def package_status():
 
     methods = ("search", "search_raw", "tweet_details", "following", "user_by_login", "user_by_id")
     return {
-        "status": "Ready for imports",
+        "status": "Ready",
         "version": installed,
+        "limits": {"hour": HOURLY_LIMIT, "day": DAILY_LIMIT},
         "methods": [name for name in methods if callable(getattr(API, name, None))],
         "cookieSetup": callable(getattr(AccountsPool, "add_account_cookies", None)),
     }
@@ -144,8 +147,8 @@ def reserve_request(db, now):
         row = connection.execute("SELECT value_json FROM settings WHERE key=?", (REQUEST_KEY,)).fetchone()
         stamps = [stamp for stamp in (json.loads(row[0]) if row else []) if stamp + DAY > now]
         hourly = [stamp for stamp in stamps if stamp + HOUR > now]
-        hold = max(hourly[-60] + HOUR if len(hourly) >= 60 else 0,
-                   stamps[-600] + DAY if len(stamps) >= 600 else 0)
+        hold = max(hourly[-HOURLY_LIMIT] + HOUR if len(hourly) >= HOURLY_LIMIT else 0,
+                   stamps[-DAILY_LIMIT] + DAY if len(stamps) >= DAILY_LIMIT else 0)
         if hold:
             return hold
         stamps.append(now)
@@ -187,7 +190,7 @@ def response_block(status, headers, now):
 
 
 async def live_request(request):
-    if package_status()["status"] != "Ready for imports":
+    if package_status()["status"] != "Ready":
         return {"status": 503}
     import httpx
     from twscrape import API, Account, AccountsPool, AbortReqError, XClIdParseError, set_log_level

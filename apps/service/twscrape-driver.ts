@@ -1,4 +1,4 @@
-import {termKey,type Candidate,type Watchlist} from '../../packages/contracts/index';
+import {termKey,X_MIN_POLL_SECONDS,type Candidate,type Watchlist} from '../../packages/contracts/index';
 import {z} from 'zod';
 import {ApiError} from './api';
 import type {CollectionCredentials} from './desktop-ipc';
@@ -50,7 +50,7 @@ export function twscrapeDriver(worker:Pick<TwscrapeWorker,'live'>,db:string,cred
   return {
     // The launcher checks the local opt-in. It does not issue or verify X permission.
     authorizationReference:'MONITOR_TWSCRAPE_LIVE',
-    minPollMs:120_000,
+    minPollMs:X_MIN_POLL_SECONDS*1000,
     capabilities:['Latest search','Search pagination','Post engagement refresh','Following (up to 100 accounts)'],
     async authorizeInteractively(signal){
       const session=await credentials(signal);

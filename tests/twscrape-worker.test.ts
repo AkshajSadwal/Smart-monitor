@@ -33,11 +33,12 @@ test('Python protocol describes the installed package and rejects live commands'
     return JSON.parse(result.stdout);
   };
   const probe=call({action:'status'}).result;
-  assert.ok(['Ready for imports','Package missing','Package version mismatch'].includes(probe.status));
-  if(probe.status==='Ready for imports'){
+  assert.ok(['Ready','Package missing','Package version mismatch'].includes(probe.status));
+  if(probe.status==='Ready'){
     assert.equal(probe.version,'0.21.1');
     assert.deepEqual(probe.methods,['search','search_raw','tweet_details','following','user_by_login','user_by_id']);
     assert.equal(probe.cookieSetup,true);
+    assert.deepEqual(probe.limits,{hour:60,day:600});
   }
   assert.deepEqual(call({action:'search'}),{error:'Invalid request'});
   const worker=new TwscrapeWorker(python,directory);
@@ -70,7 +71,7 @@ test('cancellation terminates an in-flight worker and permits the following requ
     controller.abort();
     await cancelled;
     writeFileSync(script,'import json\nimport sys\njson.load(sys.stdin)\nprint(\'{"result":{"status":"Package missing"}}\')\n');
-    assert.equal(await worker.status(),'Package missing');
+    assert.deepEqual(await worker.status(),{status:'Package missing'});
   }finally{
     controller.abort();
     rmSync(script,{force:true});

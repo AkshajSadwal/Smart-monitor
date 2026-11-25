@@ -17,6 +17,7 @@ export interface Collector {
   readonly capabilities:readonly string[];
   // Earliest safe upstream access; Infinity means authorization is unavailable.
   readonly nextAllowedAt?:number;
+  readonly nextPollAt?:number;
   readonly nextLookupAt?:number;
   readonly availabilityStatus?:string;
   collect(lists:Watchlist[],now:number,signal:AbortSignal,commit:CommitPage):Promise<boolean>;

@@ -33,6 +33,8 @@ export function termKey(t: {kind:string; text:string}) {
 export type Rule = z.output<typeof watchlist>;
 export type Watchlist = Rule & {id:string; revision:number; createdAt:number; updatedAt:number; matches:number};
 export const defaultWeights = {term:35, popularity:20, velocity:15, following:10, likedAuthor:5, favorite:10, feedback:5};
+export const DEFAULT_POLL_SECONDS=300;
+export const X_MIN_POLL_SECONDS=120;
 export type Signal = keyof typeof defaultWeights;
 const wallTime = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
 const zone = z.string().max(80).refine(value => {
@@ -51,7 +53,7 @@ export const settingsSchema = z.strictObject({
 });
 export type Settings = z.infer<typeof settingsSchema>;
 export const defaults: Settings = {
-  intervalSeconds:300, dailyCap:20, quiet:{enabled:false,start:'22:00',end:'08:00',zone:Intl.DateTimeFormat().resolvedOptions().timeZone},
+  intervalSeconds:DEFAULT_POLL_SECONDS, dailyCap:20, quiet:{enabled:false,start:'22:00',end:'08:00',zone:Intl.DateTimeFormat().resolvedOptions().timeZone},
   weights:defaultWeights, importantTerms:[], retentionDays:30, reduceMotion:false, nativeNotifications:true,
   simulatedNotifications:false,officialEmbeds:false,
 };
@@ -94,7 +96,7 @@ export type Match = Score & {listId:string;listName:string;revision:number;suppr
 export type Post = Omit<Candidate,'observation'|'text'|'collector'|'media'> & {
   text:string|null; originalUrl:string|null; firstSeenAt:number; simulated:boolean; matches:Match[];
   feedback:Feedback; preferences:Preferences; snapshots?:{collectedAt:number;metrics:Metrics}[];
-  preview?:'simulation'|'user-shared'|'manual-import'|'metadata'|'unresolved'|'stale';
+  preview?:'simulation'|'user-shared'|'manual-import'|'local-collection'|'metadata'|'unresolved'|'stale';
   collector?:HistoryCollectorId;
   provenance?:HistoryCollectorId[];
   media?:z.infer<typeof postMediaSchema>[];
@@ -136,4 +138,8 @@ export type SourceInfo = {
   coverage?:CollectionCoverage;
   manualPosts?:number;
   pythonWorker?:string;
+  requestUsage?:RequestUsage;
+};
+export type RequestUsage = {
+  hour:{used:number;limit:number};day:{used:number;limit:number};heldUntil:number|null;
 };

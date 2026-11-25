@@ -3,7 +3,7 @@ import staticFiles from '@fastify/static';
 import { existsSync } from 'node:fs';
 import { randomBytes,timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { browserActionSchema,collectorSchema,feedbackSchema,historyCollectorSchema,kindSchema,namespaceSchema,preferencesSchema,settingsSchema,unknownMetrics,watchlist,type BrowserAccount,type BrowserAction,type Candidate,type Post,type SourceInfo } from '../../packages/contracts/index';
+import { browserActionSchema,collectorSchema,feedbackSchema,historyCollectorSchema,kindSchema,namespaceSchema,preferencesSchema,settingsSchema,unknownMetrics,watchlist,X_MIN_POLL_SECONDS,type BrowserAccount,type BrowserAction,type Candidate,type Post,type SourceInfo } from '../../packages/contracts/index';
 import { localTime,scorePost } from './rank';
 import { hash,postSelect,type PostRow } from './storage';
 import type { Monitor } from './monitor';
@@ -27,7 +27,7 @@ export function createApi(monitor:Monitor,options:{
   webRoot?:string;profile:string;controlToken:string;stop:()=>void;
   browserAccount?:(action:BrowserAction)=>Promise<BrowserAccount>;
   website?:WebsiteSession;
-  twscrape?:TwscrapeWorker;
+  twscrape?:Pick<TwscrapeWorker,'status'|'normalize'>;
   cleanupRetiredCredentials?:()=>Promise<void>;
   erase:()=>Promise<void>;
 }) {
@@ -364,9 +364,9 @@ export function createApi(monitor:Monitor,options:{
     const patch=z.record(z.string(),z.unknown()).parse(req.body);
     const previous=store.settings;
     const preferences=settingsSchema.parse({...previous,...patch});
-    if(store.active.id==='session'&&preferences.intervalSeconds<120){
-      if('intervalSeconds' in patch)throw new ApiError(400,'X_POLL_INTERVAL','Set the Local X Account polling interval to at least 120 seconds.');
-      preferences.intervalSeconds=120;
+    if(store.active.id==='session'&&preferences.intervalSeconds<X_MIN_POLL_SECONDS){
+      if('intervalSeconds' in patch)throw new ApiError(400,'X_POLL_INTERVAL',`Set the Local X Account polling interval to at least ${X_MIN_POLL_SECONDS} seconds.`);
+      preferences.intervalSeconds=X_MIN_POLL_SECONDS;
     }
     store.db.transaction(()=>{
       if (previous.quiet.zone!==preferences.quiet.zone) {
@@ -392,18 +392,21 @@ export function createApi(monitor:Monitor,options:{
     return {...preferences,revision:store.revision('preferences')};
   });
   api.get('/api/v1/sources',async():Promise<SourceInfo[]>=>{
-    const pythonWorker=await options.twscrape?.status();
+    const worker=await options.twscrape?.status();
+    const status=monitor.status;
     return store.sources.map(row=>{
       const browser=row.id==='session'?browserState:undefined;
       const session=row.id==='session'?options.website?.state:undefined;
-      const status=monitor.status;
       const supported=row.id!=='session'||(!!session&&session.status!=='Unsupported');
+      const pythonWorker=worker?.status==='Ready'?`Ready for ${supported?'live collection':'local imports'} (twscrape ${worker.version})`:worker?.status;
       const postCount=store.count(`SELECT count(*) n FROM post_sources s JOIN posts p ON p.namespace=s.namespace AND p.id=s.post_id
         WHERE s.collector=? AND (?<>'session' OR (p.observation NOT LIKE 'user-shared:%' AND p.observation NOT LIKE 'manual:%'))`,row.id,row.id);
       return {
         id:row.id,active:!!row.active,configured:supported&&!!row.configured,status:session?.status??row.status,error:supported?row.error_code:null,
         lastSuccess:row.last_success_at,nextDue:row.active&&supported?status.nextDue:null,postCount,gap:row.gap,coverage:store.coverage(row.id),capabilities:[...(monitor.sources.get(row.id)?.capabilities??[])],
-        ...(browser?{browser:{...browser,available:!!options.browserAccount},account:browser.status==='Connected'?browser.handle:null,pythonWorker,manualPosts:store.count("SELECT count(*) n FROM post_sources WHERE collector='manual'")}:{}),
+        ...(browser?{browser:{...browser,available:!!options.browserAccount},account:browser.status==='Connected'?browser.handle:null,pythonWorker,
+          requestUsage:worker?.status==='Ready'?store.requestUsage(monitor.clock(),worker.limits):undefined,
+          manualPosts:store.count("SELECT count(*) n FROM post_sources WHERE collector='manual'")}:{}),
       };
     });
   });

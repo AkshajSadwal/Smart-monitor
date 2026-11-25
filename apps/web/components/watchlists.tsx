@@ -12,13 +12,12 @@ function draftFrom(list:Watchlist):Rule {
   const {name,mode,enabled,terms,allowedAuthors,favoriteAuthors,language,minEngagement,standard,immediate,cooldownSeconds}=list;
   return {name,mode,enabled,terms,allowedAuthors,favoriteAuthors,language,minEngagement,standard,immediate,cooldownSeconds};
 }
-export function Watchlists({lists,paused,run,busy}:{lists:Watchlist[];paused:boolean;run:Run;busy:boolean}) {
+export function Watchlists({lists,run,busy}:{lists:Watchlist[];run:Run;busy:boolean}) {
   const [editor,setEditor]=useState<{draft:Rule;list?:Watchlist}|null>(null),[remove,setRemove]=useState<Watchlist|null>(null);
   return <>
     <div className="actions section-actions">
       <button className="button primary" onClick={()=>setEditor({draft:fresh()})}><Plus size={17}/> New watchlist</button>
       <button className="button" onClick={()=>setEditor({draft:example()})}>Use SQLite example</button>
-      {paused&&lists.some(l=>l.enabled)&&<button className="button" disabled={busy} onClick={()=>void run(()=>request('/monitor','PUT',{paused:false}),'Monitoring started.')}><Play size={16}/> Start monitoring</button>}
     </div>
     {!lists.length?<section className="panel empty"><Target size={30}/><h2>Watch your first topic</h2><p>Start with the SQLite example to try monitoring with simulated posts.</p></section>:
       <div className="list-grid">{lists.map(list=><section className="panel watch-card" key={list.id}>

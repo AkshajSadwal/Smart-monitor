@@ -2,6 +2,9 @@ import {test,expect} from '@playwright/test';
 import {execFileSync} from 'node:child_process';
 import {mkdtempSync,mkdirSync,rmSync} from 'node:fs';
 import {resolve,join} from 'node:path';
+import {Monitor} from '../../apps/service/monitor';
+import {Store} from '../../apps/service/storage';
+import {unknownMetrics,watchlist} from '../../packages/contracts/index';
 
 const root=resolve('.local');
 let profile:string;
@@ -62,12 +65,43 @@ test('production launcher, watchlist preview, closed-tab polling, feedback and d
   active=await context.newPage();
   await active.goto(cli('open','--print'));
   await expect(active.getByText(/SQLite release candidate is ready/)).toBeVisible();
+  await active.getByRole('link',{name:'Settings',exact:true}).click();
   await active.getByRole('button',{name:'Pause monitoring'}).click();
   await expect(active.getByText('Monitoring paused.')).toBeVisible();
+  await active.getByRole('link',{name:'Watchlists',exact:true}).click();
+  await expect(active.getByRole('button',{name:'Start monitoring'})).toHaveCount(1);
+  await active.getByRole('link',{name:'Overview',exact:true}).click();
   await active.setViewportSize({width:320,height:720});
   await expect(active.getByRole('button',{name:'Menu'})).toBeVisible();
   expect(await active.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
   await active.screenshot({path:testInfo.outputPath('dashboard-320.png')});
+});
+
+test('local collection cards show available preview fields and an independent Open on X link',async({page})=>{
+  const store=new Store(join(profile,'monitor.sqlite'));
+  const now=Date.now(),id='1951234567890123456';
+  try{
+    const list=store.saveList(watchlist.parse({name:'SQLite',terms:[{direction:'include',kind:'word',text:'SQLite'}]}),now);
+    new Monitor(store,()=>now).ingest({namespace:'x',id,canonicalId:id,collector:'session',text:'SQLite release candidate from a local fixture',
+      authorId:'42',displayName:'SQLite News',handle:'sqlite_news',createdAt:now-60_000,observedAt:now,observation:'website:twscrape:fixture',
+      kind:'original',language:'en',metrics:{...unknownMetrics,likes:12,replies:0},
+      media:[{kind:'photo',url:'https://pbs.twimg.com/media/fixture.png',width:640,height:480,alt:'Release image',durationMs:null}]},[list],now,false,true);
+  }finally{store.close();}
+  await page.goto(cli('open','--print'));
+  await page.getByRole('link',{name:'Post feed',exact:true}).click();
+  await page.getByRole('combobox',{name:'Source',exact:true}).selectOption('session');
+  const card=page.locator('.post-row').filter({hasText:'SQLite News'});
+  await expect(card.getByText('@sqlite_news')).toBeVisible();
+  await expect(card.getByText('12 likes')).toBeVisible();
+  await expect(card.getByText('0 replies')).toBeVisible();
+  await expect(card.getByText('views')).toHaveCount(0);
+  await expect(card.getByText('1 photo')).toBeVisible();
+  await expect(card.getByRole('link',{name:'Open on X'})).toHaveAttribute('href',`https://x.com/i/web/status/${id}`);
+  await card.getByRole('button',{name:/SQLite release candidate from a local fixture/}).click();
+  const detail=page.getByRole('dialog',{name:'Post details'});
+  await expect(detail.getByRole('link',{name:'Open on X'})).toBeVisible();
+  await detail.getByText('Media (1)').click();
+  await expect(detail.getByText(/640 × 480 · Release image/)).toBeVisible();
 });
 
 test('small layout shows static mascot when WebGL is unavailable',async({page})=>{

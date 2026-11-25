@@ -65,6 +65,100 @@ test('twscrape binds the confirmed account, ingests search, and schedules follow
   }finally{await monitor.stop();store.close();}
 });
 
+test('live feed returns verified twscrape previews and preserves the cache policy on identical observations',async()=>{
+  const store=new Store(':memory:');
+  let now=initial;
+  const monitor=new Monitor(store,()=>now);
+  const {api,setOrigin}=createApi(monitor,{profile:'test',controlToken:'fixture-control',stop:()=>{},erase:async()=>{}});
+  setOrigin(origin);
+  const list=store.saveList(watchlist.parse({name:'SQLite',terms:[{kind:'word',text:'SQLite',direction:'include'}]}),now);
+  const live:Candidate={...candidate,collector:'session',displayName:'SQLite News',observation:'website:twscrape:fixture',
+    metrics:{...candidate.metrics,replies:0,quotes:2},media:[{kind:'photo',url:null,width:640,height:480,alt:'Fixture photo',durationMs:null}]};
+  const historical={...live,id:'22',canonicalId:'22',observation:'historical-source',text:'SQLite historical text'};
+  try{
+    monitor.ingest(live,[list],now,false,true);
+    monitor.ingest(historical,[list],now,false,true);
+    const boot=await api.inject({method:'POST',url:'/api/control/bootstrap',headers:{host,'x-monitor-control':'fixture-control'},payload:{}});
+    const session=await api.inject({method:'POST',url:'/api/v1/session',headers:{host,origin},payload:{nonce:new URL(boot.json().url).hash.slice(6)}});
+    const headers={host,origin,cookie:String(session.headers['set-cookie']).split(';')[0]};
+    const feed=(await api.inject({url:'/api/v1/posts?collector=session',headers})).json().items;
+    const result=feed.find((post:Candidate)=>post.id===live.id);
+    assert.equal(result.preview,'local-collection');
+    assert.equal(result.text,live.text);
+    assert.equal(result.displayName,'SQLite News');
+    assert.equal(result.handle,'fixture');
+    assert.equal(result.metrics.replies,0);
+    assert.equal(result.metrics.views,null);
+    assert.equal(result.originalUrl,`https://x.com/i/web/status/${live.id}`);
+    assert.deepEqual(result.media,live.media);
+    const retained=feed.find((post:Candidate)=>post.id===historical.id);
+    assert.equal(retained.preview,'metadata');
+    assert.equal(retained.text,null);
+    assert.equal(retained.handle,null);
+    const detail=async()=>(await api.inject({url:`/api/v1/posts/x/${live.id}`,headers})).json();
+    now+=24*3_600_000+1;
+    assert.equal((await detail()).preview,'stale');
+    assert.equal((await detail()).text,null);
+    monitor.ingest({...live,observedAt:now},[list],now,false,true);
+    assert.equal((await detail()).text,live.text);
+    assert.equal((await detail()).snapshots.length,1);
+  }finally{await api.close();store.close();}
+});
+
+test('global pause aborts active collection, preserves the earliest next search, and exposes rolling usage',async()=>{
+  const store=new Store(':memory:'),{vault}=credentials();
+  let now=initial,searches=0;
+  const hour=3_600_000;
+  let start!:(signal:AbortSignal)=>void,finish!:(response:Response)=>void;
+  const started=new Promise<AbortSignal>(resolve=>{start=resolve;});
+  const pending=new Promise<Response>(resolve=>{finish=resolve;});
+  const account=new WebsiteSession(store,vault,{
+    authorizationReference:'fixture-only',minPollMs:120_000,
+    authorizeInteractively:async()=>({handle:'fixture',opaqueGrant:'fixture',expiresAt:initial+hour}),
+    search:async(_grant,_lists,_cursor,request)=>{searches++;start(request);return pending;},
+  },()=>now);
+  const monitor=new Monitor(store,()=>now,async()=>assert.fail('Cancelled collection dispatched an alert'),undefined,account);
+  const {api,setOrigin}=createApi(monitor,{profile:'test',controlToken:'fixture-control',stop:()=>{},erase:async()=>{},website:account,
+    twscrape:{status:async()=>({status:'Ready',version:'0.21.1',limits:{hour:60,day:600}}),normalize:async()=>[]}});
+  setOrigin(origin);
+  try{
+    await account.connect(signal);
+    store.run('UPDATE data_sources SET active=0 WHERE active=1');
+    store.run("UPDATE data_sources SET active=1 WHERE id='session'");
+    store.saveList(watchlist.parse({name:'SQLite',terms:[{kind:'word',text:'SQLite',direction:'include'}]}),now);
+    store.set('twscrape:requests',[now-86400000,now-hour,now-hour+1,now-1]);
+    const boot=await api.inject({method:'POST',url:'/api/control/bootstrap',headers:{host,'x-monitor-control':'fixture-control'},payload:{}});
+    const session=await api.inject({method:'POST',url:'/api/v1/session',headers:{host,origin},payload:{nonce:new URL(boot.json().url).hash.slice(6)}});
+    const headers={host,origin,cookie:String(session.headers['set-cookie']).split(';')[0],'x-monitor-csrf':session.json().csrf};
+    const source=async()=>(await api.inject({url:'/api/v1/sources',headers})).json<SourceInfo[]>().find(item=>item.id==='session')!;
+    assert.equal((await source()).pythonWorker,'Ready for live collection (twscrape 0.21.1)');
+    assert.deepEqual((await source()).requestUsage,{hour:{used:2,limit:60},day:{used:3,limit:600},heldUntil:null});
+    now++;
+    assert.equal((await source()).requestUsage?.hour.used,1);
+    store.set('twscrape:hold',now+600_000);
+    assert.equal((await source()).requestUsage?.heldUntil,now+600_000);
+    store.set('twscrape:hold',0);
+    assert.equal(monitor.status.intervalSeconds,300);
+    const interval=(intervalSeconds:number)=>api.inject({method:'PATCH',url:'/api/v1/settings',headers:{...headers,'if-match':'0'},payload:{intervalSeconds}});
+    assert.equal((await interval(119)).json().error.code,'X_POLL_INTERVAL');
+    assert.equal((await interval(180)).json().intervalSeconds,180);
+    const pause=(paused:boolean)=>api.inject({method:'PUT',url:'/api/v1/monitor',headers,payload:{paused}});
+    await pause(false);
+    const flight=monitor.tick();
+    const request=await started;
+    assert.equal(monitor.status.status,'Collecting');
+    assert.equal(monitor.status.nextDue,null);
+    assert.equal((await pause(true)).json().nextDue,null);
+    assert.ok(request.aborted);
+    finish(response({items:[candidate],next:null}));
+    await flight;
+    await monitor.tick();
+    assert.equal(store.row('x',candidate.id),undefined);
+    assert.equal(searches,1);
+    assert.equal((await pause(false)).json().nextDue,now+120_000);
+  }finally{await monitor.stop();await api.close();store.close();}
+});
+
 test('an authorized session fixture persists the cursor and dispatches through the actual monitor',async()=>{
   const store=new Store(':memory:'),{vault,values}=credentials();
   let time=initial,dispatches=0,handle='fixture';

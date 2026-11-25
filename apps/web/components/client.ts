@@ -1,3 +1,5 @@
+import type {MonitorStatus} from '../../../packages/contracts/index';
+
 let csrf='';
 let login:Promise<void>|undefined;
 
@@ -33,3 +35,10 @@ export const timestamp=(value:number|null|undefined)=>{
   if (value===null||value===undefined) return '—';
   return new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(value);
 };
+export const nextCollection=(due:number|null,collecting:boolean,heldUntil?:number|null)=>
+  collecting?'In progress':due===null?'Unscheduled':timestamp(Math.max(due,heldUntil??0));
+export function monitoringLabel(status:MonitorStatus){
+  if(status.paused)return 'Paused';
+  if(['Ready','Polling','Connected'].includes(status.status))return status.nextDue===null?'Waiting for a watchlist':'Monitoring';
+  return status.status;
+}

@@ -28,7 +28,8 @@ code{overflow-wrap:anywhere;color:var(--blue);font-size:.9em}
 .dot{height:8px;width:8px;border-radius:50%;background:var(--green);flex:none;box-shadow:0 0 10px #90d9b560}
 .menu{display:none!important}
 .main{min-width:0}
-.topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:13px clamp(18px,3.3vw,48px);border-bottom:1px solid #2b3a4e;min-height:63px;background:#141f2a72}
+.topbar{position:sticky;top:0;z-index:2;display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px clamp(18px,3.3vw,48px);border-bottom:1px solid #2b3a4e;min-height:63px;background:#141f2af2}
+.monitor-controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;margin-left:auto}
 .crumb{color:var(--secondary);display:flex;align-items:center;gap:8px;font-size:13px}
 .status-pill,.chip{display:inline-flex;align-items:center;gap:7px;border:1px solid #3b5671;border-radius:999px;color:#c6e2fc;background:#22374e;padding:4px 10px;font-size:12px;font-weight:550;overflow-wrap:anywhere}
 .status-pill{border-color:#3c6159;background:#19352f;color:#b6ebd1}
@@ -79,7 +80,12 @@ code{overflow-wrap:anywhere;color:var(--blue);font-size:.9em}
 .post-body:hover .post-copy{color:#c5e5ff}
 .post-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
 .post-meta strong{color:var(--text);font-size:14px}
-.post-copy{font-size:14px}
+.post-copy{font-size:14px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere}
+.detail-copy{white-space:pre-wrap;overflow-wrap:anywhere}
+.post-counters{display:flex;flex-wrap:wrap;gap:4px 10px;color:var(--secondary);font-size:12px}
+.post-counters strong{color:var(--text)}
+.post-actions{display:grid;justify-items:end;gap:7px}
+.post-actions .button{padding-inline:9px;white-space:nowrap}
 .post-reason{display:flex;gap:6px;align-items:center;color:var(--blue);font-size:12px}
 .post-reason svg{flex:none}
 .chip.mini{font-size:10px;padding:0 6px}

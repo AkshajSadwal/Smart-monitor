@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import {createHash,randomUUID} from 'node:crypto';
 import {existsSync,rmSync} from 'node:fs';
-import { defaults,normalize,termKey,unknownMetrics,type Alert,type Candidate,type CollectionCoverage,type CollectorId,type Feedback,type HistoryCollectorId,type Match,type Post,type Preferences,type Rule,type Settings,type Source,type Watchlist } from '../../packages/contracts/index';
+import { defaults,normalize,termKey,unknownMetrics,type Alert,type Candidate,type CollectionCoverage,type CollectorId,type Feedback,type HistoryCollectorId,type Match,type Post,type Preferences,type RequestUsage,type Rule,type Settings,type Source,type Watchlist } from '../../packages/contracts/index';
 
 const migrations = [
   `
@@ -203,6 +203,14 @@ export class Store {
   changeCoverage(id:CollectorId,update:Partial<CollectionCoverage>) {
     this.set('coverage:'+id,{...this.coverage(id),...update});
   }
+  requestUsage(now:number,limits:{hour:number;day:number}):RequestUsage {
+    const hour=3_600_000,day=24*hour;
+    const daily=this.value<number[]>('twscrape:requests',[]).filter(at=>at+day>now);
+    const hourly=daily.filter(at=>at+hour>now);
+    const heldUntil=Math.max(this.value('twscrape:hold',0),
+      (hourly.at(-limits.hour)??-hour)+hour,(daily.at(-limits.day)??-day)+day);
+    return {hour:{used:hourly.length,limit:limits.hour},day:{used:daily.length,limit:limits.day},heldUntil:heldUntil>now?heldUntil:null};
+  }
   get lists():Watchlist[] {
     return this.all<ListRow>('SELECT w.*, (SELECT count(*) FROM scores s WHERE s.list_id=w.id) AS matches FROM watchlists w ORDER BY created_at,id')
       .map(row=>({...json<Rule>(row.rule_json),id:row.id,revision:row.revision,createdAt:row.created_at,updatedAt:row.updated_at,matches:row.matches}));
@@ -235,12 +243,14 @@ export class Store {
     const preview=display?.shared;
     const stale=source==='x'&&now!==undefined&&row.verified_at!==null&&row.verified_at<now-24*60*60_000;
     const provenance=this.all<{collector:HistoryCollectorId}>('SELECT collector FROM post_sources WHERE namespace=? AND post_id=? ORDER BY observed_at DESC,collector',source,id).map(value=>value.collector);
-    return {namespace:source,id,canonicalId:p.canonicalId,text:source==='mock'?p.text:preview??null,
-      preview:source==='mock'?'simulation':preview?display?.manual??'user-shared':stale?'stale':p.text?'metadata':'unresolved',
-      authorId:p.authorId,handle:source==='mock'||preview?p.handle:null,displayName:source==='mock'?p.displayName:display?.displayName??null,
+    const local=source==='x'&&row.verified_at!==null&&!stale&&provenance.includes('session')&&p.observation.startsWith('website:twscrape:');
+    return {namespace:source,id,canonicalId:p.canonicalId,text:source==='mock'?p.text:preview??(local&&p.text?p.text:null),
+      preview:source==='mock'?'simulation':preview?display?.manual??'user-shared':local?'local-collection':stale?'stale':p.text?'metadata':'unresolved',
+      authorId:p.authorId,handle:source==='mock'||preview||local?p.handle:null,
+      displayName:source==='mock'?p.displayName:display?.displayName??(local?p.displayName:null),
       language:stale?null:p.language,createdAt:stale?null:p.createdAt,kind:stale?'unknown':p.kind,metrics:stale?unknownMetrics:p.metrics,observedAt:p.observedAt,
       simulated:source==='mock',firstSeenAt:row.first_seen_at,originalUrl:canonicalUrl(source,id),
-      collector:provenance[0],...(detail?{provenance,media:display?.media}:{}),
+      collector:provenance[0],...(detail?{provenance}:{}),...((preview||local)&&display?.media?{media:display.media}:{}),
       matches:this.matches(source,id).map(match=>detail?match:{...match,signals:[],unavailable:[],penalties:[]}),
       feedback:this.feedback(source,id),preferences:this.preferences(source,p.authorId),
       ...(detail?{snapshots:stale?[]:this.all<{collected_at:number;metrics:string}>('SELECT collected_at,metrics FROM engagement_snapshots WHERE namespace=? AND post_id=? ORDER BY collected_at DESC LIMIT 20',source,id).map(s=>({collectedAt:s.collected_at,metrics:json(s.metrics)}))}:{})};
@@ -270,6 +280,9 @@ export class Store {
   persist(p:Candidate,now:number) {
     if(p.namespace==='x'&&(this.blockedX(p.id)||(p.canonicalId!==p.id&&this.blockedX(p.canonicalId))))return false;
     if (this.get('SELECT 1 FROM engagement_snapshots WHERE namespace=? AND post_id=? AND observation=?',p.namespace,p.id,p.observation)) {
+      if(p.collector==='session'&&p.observation.startsWith('website:twscrape:'))
+        this.run('UPDATE posts SET verified_at=max(coalesce(verified_at,0),?),last_seen_at=max(last_seen_at,?) WHERE namespace=? AND id=? AND observation=?',
+          now,p.observedAt,p.namespace,p.id,p.observation);
       this.provenance(p);
       return false;
     }

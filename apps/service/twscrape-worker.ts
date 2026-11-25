@@ -6,7 +6,10 @@ import {collectedPost} from '../../packages/collection-core/collector';
 
 const workerPost=collectedPost.safeExtend({namespace:z.literal('x'),media:z.array(postMediaSchema).max(10).nullable()});
 const postBatch=z.array(workerPost).min(1).max(50);
-const statusReply=z.object({status:z.enum(['Ready for imports','Package missing','Package version mismatch']),version:z.string().optional()});
+const statusReply=z.discriminatedUnion('status',[
+  z.object({status:z.literal('Ready'),version:z.string(),limits:z.object({hour:z.number().int().positive(),day:z.number().int().positive()})}),
+  z.object({status:z.enum(['Package missing','Package version mismatch','Unavailable'])}),
+]);
 const envelope=z.union([z.strictObject({result:z.unknown()}),z.strictObject({error:z.enum(['Invalid request','Worker unavailable'])})]);
 const xId=z.string().regex(/^\d{1,25}$/);
 const liveReply=z.strictObject({status:z.union([z.literal(200),z.literal(401),z.literal(403),z.literal(428),z.literal(429),z.literal(503)]),
@@ -15,17 +18,15 @@ const liveReply=z.strictObject({status:z.union([z.literal(200),z.literal(401),z.
 export type LiveReply=z.infer<typeof liveReply>;
 
 export class TwscrapeWorker {
-  private probe?:{expires:number;result:Promise<string>};
+  private probe?:{expires:number;result:Promise<z.infer<typeof statusReply>>};
   private networkActive=false;
 
   constructor(private readonly python:string,private readonly directory:string){}
 
   status(){
     if(!this.probe||Date.now()>=this.probe.expires){
-      const result=this.run({action:'status'},AbortSignal.timeout(4000)).then(reply=>{
-        const {status,version}=statusReply.parse(reply);
-        return version?`${status} (twscrape ${version})`:status;
-      }).catch(()=>'Unavailable');
+      const result=this.run({action:'status'},AbortSignal.timeout(4000)).then(reply=>statusReply.parse(reply))
+        .catch(()=>({status:'Unavailable' as const}));
       this.probe={expires:Date.now()+30_000,result};
     }
     return this.probe.result;

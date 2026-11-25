@@ -46,6 +46,7 @@ export class WebsiteSession implements Collector {
     if(this.pendingChanges||!state.expiresAt||!['Connected','Collecting','Rate limited','Temporarily unavailable'].includes(state.status))return Infinity;
     return state.retryAt??0;
   }
+  get nextPollAt(){return this.driver?.minPollMs?this.store.value('twscrape:search-next',0):0;}
   private change<T>(work:()=>Promise<T>):Promise<T>{
     this.generation++;
     this.pendingChanges++;
@@ -57,6 +58,9 @@ export class WebsiteSession implements Collector {
     if(!this.driver?.authorizationReference)return {status:'Unsupported'};
     const saved=this.store.value<SessionState>('website:state',{status:'Authentication required'});
     if(saved.expiresAt&&saved.expiresAt<=this.clock())return {...saved,status:'Session expired'};
+    const hold=this.driver.minPollMs?this.store.value('twscrape:hold',0):0;
+    if(hold>this.clock()&&['Connected','Collecting','Rate limited','Temporarily unavailable'].includes(saved.status))
+      return {...saved,status:'Rate limited',retryAt:Math.max(hold,saved.retryAt??0)};
     return saved.status==='Collecting'&&!this.collecting?{...saved,status:'Connected'}:saved;
   }
   private setState(state:SessionState) {
@@ -115,8 +119,8 @@ export class WebsiteSession implements Collector {
     if((state.retryAt??0)>now){this.store.set('next:session',state.retryAt);return false;}
     const minPoll=this.driver.minPollMs;
     const searchKey='twscrape:search-next';
-    if(minPoll&&this.store.value(searchKey,0)>now){
-      this.store.set('next:session',this.store.value(searchKey,0));
+    if(minPoll&&this.nextPollAt>now){
+      this.store.set('next:session',this.nextPollAt);
       return false;
     }
     const current=()=>!signal.aborted&&generation===this.generation;

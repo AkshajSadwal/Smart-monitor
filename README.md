@@ -57,7 +57,7 @@ $env:MONITOR_TWSCRAPE_LIVE = '1'
 npm.cmd run start -w @monitor/desktop
 ~~~
 
-In **Data sources → Local X Account**, sign in, confirm your X profile, and select **Enable collection → Use Local X Account**. Create an enabled watchlist and resume monitoring on the Dashboard. Check **Last successful collection**, **Collected posts**, and **Post feed → Local X Account** to verify results. Leave the flag unset to use browser sign-in and manual imports alone.
+In **Data sources → Local X Account**, sign in, confirm your X profile, and select **Enable collection → Use Local X Account**. Enable a watchlist and use **Start monitoring** in the top bar. The Dashboard and Data Sources show the next scheduled collection and rolling request usage. Change the interval under **Settings → Monitoring and alerts**. Choose **Local X Account** in the Post feed to see available cached previews and open originals on X. Leave the flag unset to use browser sign-in and manual imports alone.
 
 The adapter uses the current confirmed Electron session. Request limits are shared across operations in the local profile and survive restarts and reconnects. The app uses one account at a time. Following sync includes up to 100 accounts per day. Live liked-post retrieval is unavailable in the pinned package.
 

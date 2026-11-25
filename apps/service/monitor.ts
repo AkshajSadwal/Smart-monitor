@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {EventEmitter} from 'node:events';
-import {type Candidate,type CollectorId,type Match,type Metrics,type MonitorStatus,type Settings,type Source,type Watchlist} from '../../packages/contracts/index';
+import {X_MIN_POLL_SECONDS,type Candidate,type CollectorId,type Match,type Metrics,type MonitorStatus,type Settings,type Source,type Watchlist} from '../../packages/contracts/index';
 import {SourceManager,type Collector,type CommitPage} from '../../packages/collection-core/collector';
 import {simulatedCollector} from './simulated';
 import {localTime,quietNow,scorePost} from './rank';
@@ -13,6 +13,7 @@ export class Monitor {
   private timer?:NodeJS.Timeout;
   private flight?:Promise<void>;
   private controller?:AbortController;
+  private collecting?:CollectorId;
   readonly sources:SourceManager;
   private running=false;
   private lastCleanup=0;
@@ -24,28 +25,30 @@ export class Monitor {
     const row=this.store.active;
     const collector=this.sources.get(row.id);
     const due=this.pollDue(row.id);
-    const state=collector?.availabilityStatus??row.status;
+    const collecting=this.collecting===row.id;
+    const state=collecting?'Collecting':collector?.availabilityStatus??row.status;
     return {paused:this.store.paused,source:row.id,status:this.store.paused?'Paused':state,
-      lastSuccess:row.last_success_at,nextDue:this.store.paused||!Number.isFinite(due)||due===Number.MAX_SAFE_INTEGER||!this.store.lists.some(l=>l.enabled)?null:due,
+      lastSuccess:row.last_success_at,nextDue:this.store.paused||collecting||!Number.isFinite(due)||due===Number.MAX_SAFE_INTEGER||!this.store.lists.some(l=>l.enabled)?null:Math.max(this.clock(),due),
       error:row.error_code,gap:row.gap,intervalSeconds:this.intervalSeconds(row.id),coverage:this.store.coverage(row.id)};
   }
-  private intervalSeconds(source:CollectorId){return Math.max(source==='session'?120:60,this.store.settings.intervalSeconds);}
+  private intervalSeconds(source:CollectorId){return Math.max(source==='session'?X_MIN_POLL_SECONDS:60,this.store.settings.intervalSeconds);}
   private pollDue(source:CollectorId) {
     const collector=this.sources.get(source);
-    return collector?Math.max(this.store.value(`next:${source}`,0),collector.nextAllowedAt??0):Infinity;
+    return collector?Math.max(this.store.value(`next:${source}`,0),collector.nextAllowedAt??0,collector.nextPollAt??0):Infinity;
   }
   signal(...names:string[]) { for (const name of names) this.events.emit('change',name); }
   start() { this.running=true;this.wake(); }
   wake() {
     if (this.timer) clearTimeout(this.timer);
-    if (!this.running || this.flight) return;
+    this.timer=undefined;
+    if (!this.running || this.flight || this.store.paused) return;
     const source=this.store.active.id;
     const collector=this.sources.get(source);
     const alert=this.store.get<{due:number|null}>("SELECT min(due_at) AS due FROM monitoring_jobs WHERE collector=? AND type='alert'",source)?.due;
     const recheck=this.store.get<{due:number|null}>("SELECT min(due_at) AS due FROM monitoring_jobs WHERE collector=? AND type='recheck'",source)?.due;
     const poll=this.store.lists.some(l=>l.enabled)?this.pollDue(source):Infinity;
     const lookup=collector?.lookup?Math.max(recheck??Infinity,collector.nextAllowedAt??0,collector.nextLookupAt??0):Infinity;
-    const due=this.store.paused?Infinity:Math.min(poll,alert??Infinity,lookup);
+    const due=Math.min(poll,alert??Infinity,lookup);
     const timeout=Math.min(Math.max(100,due-this.clock()),60_000);
     this.timer=setTimeout(()=>void this.tick().finally(()=>this.wake()),timeout);
     this.timer.unref();
@@ -95,7 +98,9 @@ export class Monitor {
     if (lists.length && collector && now>=this.pollDue(source)) {
       const next=now+1000*this.intervalSeconds(source);
       this.store.changeCoverage(source,{lastAttempt:now,pages:0,posts:0});
-      const success=await collector.collect(lists,now,signal,this.commit(source,lists,signal));
+      this.collecting=source;
+      this.signal('overview.changed','source.changed');
+      const success=await collector.collect(lists,now,signal,this.commit(source,lists,signal)).finally(()=>{this.collecting=undefined;});
       if (signal.aborted) return;
       if (success) this.success(source,now,next);
       else if (this.store.value(`next:${source}`,0)<=now) this.store.set(`next:${source}`,next);

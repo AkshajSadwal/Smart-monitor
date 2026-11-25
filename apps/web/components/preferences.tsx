@@ -3,8 +3,8 @@
 import {Database,Radio} from 'lucide-react';
 import Link from 'next/link';
 import {useEffect,useState,type FormEvent} from 'react';
-import {collectorLabel,type BrowserAction,type CollectionCoverage,type MonitorStatus,type Settings,type Source,type SourceInfo} from '../../../packages/contracts/index';
-import {label,request,timestamp} from './client';
+import {collectorLabel,DEFAULT_POLL_SECONDS,X_MIN_POLL_SECONDS,type BrowserAction,type CollectionCoverage,type MonitorStatus,type RequestUsage,type Settings,type Source,type SourceInfo} from '../../../packages/contracts/index';
+import {label,monitoringLabel,nextCollection,request,timestamp} from './client';
 import {Mascot} from './mascot/mascot';
 import {Modal,type ProfileSettings,type Run} from './workspace';
 
@@ -23,9 +23,10 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
           <div><dt>Username</dt><dd>{local.account?'@'+local.account:'Awaiting confirmation'}</dd></div>
           <div><dt>Python worker</dt><dd>{local.pythonWorker??'Unavailable'}</dd></div>
           <div><dt>Session collection</dt><dd>{local.status}</dd></div>
-          <div><dt>Monitoring state</dt><dd>{local.status==='Unsupported'?(local.browser?.available?'X authorization required':'Desktop app required'):!local.active?'Not selected':monitor.paused?'Paused':monitor.status}</dd></div>
+          <div><dt>Monitoring state</dt><dd>{local.status==='Unsupported'?(local.browser?.available?'X authorization required':'Desktop app required'):!local.active?'Not selected':monitoringLabel(monitor)}</dd></div>
           <div><dt>Collection capabilities</dt><dd>{local.capabilities.length?local.capabilities.join(', '):'None available'}</dd></div>
-          <SourceStats source={local}/>
+          <SourceStats source={local} collecting={local.active&&monitor.status==='Collecting'}/>
+          <RequestUsageFields usage={local.requestUsage}/>
           <div><dt>Manually saved posts</dt><dd>{local.manualPosts??0}</dd></div>
         </dl>
         {local.status==='Unsupported'&&<p className="warning">Automatic X collection requires X authorization. The Python worker can process local exports.</p>}
@@ -98,7 +99,7 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
       </section>}
       {simulated&&<section className="panel form-stack">
         <div className="panel-heading"><div><h2>Simulated</h2><p>Test watchlists, ranking, and alerts with seeded example posts.</p></div><span className="stat-icon"><Radio size={18}/></span></div>
-        <dl className="fields"><SourceStats source={simulated}/></dl>
+        <dl className="fields"><SourceStats source={simulated} collecting={simulated.active&&monitor.status==='Collecting'}/></dl>
         <div className="actions">
           <button className="button" disabled={busy||simulated.active} onClick={()=>select(simulated)}>{simulated.active?'Selected':'Use Simulated'}</button>
           <button className="button" disabled={busy||!simulated.active} onClick={()=>void run(()=>request('/sources/mock/replay','POST'),'Simulation queued.')}>Replay simulation</button>
@@ -106,7 +107,7 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
       </section>}
     </div>
     <section className="panel form-stack">
-      <div className="panel-heading"><div><h2>Monitoring</h2><p>{collectorLabel[monitor.source]} · {monitor.status}</p></div><Mascot mode={monitor.error?'ERROR':'IDLE'} reduced={reduced}/></div>
+      <div className="panel-heading"><div><h2>Monitoring</h2><p>{collectorLabel[monitor.source]} · {monitoringLabel(monitor)}</p></div><Mascot mode={monitor.error?'ERROR':'IDLE'} reduced={reduced}/></div>
       {(monitor.error||monitor.gap)&&<p className="warning">{monitor.gap??monitor.error}</p>}
       <dl className="fields"><div><dt>Polling interval</dt><dd>{monitor.intervalSeconds} seconds</dd></div></dl>
       <CoverageFields coverage={monitor.coverage}/>
@@ -116,11 +117,20 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
   </div>;
 }
 
-function SourceStats({source}:{source:SourceInfo}) {
+function SourceStats({source,collecting}:{source:SourceInfo;collecting:boolean}) {
   return <>
     <div><dt>Last successful collection</dt><dd>{timestamp(source.lastSuccess)}</dd></div>
-    <div><dt>Next scheduled check</dt><dd>{source.nextDue===null?'Unscheduled':timestamp(source.nextDue)}</dd></div>
+    <div><dt>Next scheduled collection</dt><dd>{nextCollection(source.nextDue,collecting,source.requestUsage?.heldUntil)}</dd></div>
     <div><dt>Collected posts</dt><dd>{source.postCount}</dd></div>
+  </>;
+}
+
+export function RequestUsageFields({usage}:{usage?:RequestUsage}) {
+  if(!usage)return null;
+  return <>
+    <div><dt>Requests in the last hour</dt><dd>{usage.hour.used} / {usage.hour.limit}</dd></div>
+    <div><dt>Requests in the last 24 hours</dt><dd>{usage.day.used} / {usage.day.limit}</dd></div>
+    {usage.heldUntil!==null&&<div><dt>Request hold until</dt><dd>{timestamp(usage.heldUntil)}</dd></div>}
   </>;
 }
 
@@ -190,7 +200,7 @@ function ImportPosts({busy,close,run}:{busy:boolean;close:()=>void;run:Run}) {
 
 type Preference = {namespace:Source;id:string;handle:string|null;muted:boolean;favorite:boolean};
 export function SettingsPage({settings,run,busy,localX}:{settings:ProfileSettings;run:Run;busy:boolean;localX:boolean}) {
-  const minimum=localX?120:60;
+  const minimum=localX?X_MIN_POLL_SECONDS:60;
   const [draft,setDraft]=useState({...settings,intervalSeconds:Math.max(minimum,settings.intervalSeconds)}),[important,setImportant]=useState(settings.importantTerms.join(', '));
   const [authors,setAuthors]=useState<Preference[]>([]),[feedback,setFeedback]=useState(''),[confirmation,setConfirmation]=useState('');
   const [notificationTest,setNotificationTest]=useState('');
@@ -209,7 +219,9 @@ export function SettingsPage({settings,run,busy,localX}:{settings:ProfileSetting
   return <div className="stack">
     <form className="stack" onSubmit={save}>
       <section className="panel form-stack"><h2>Monitoring and alerts</h2><div className="form-grid">
-        <label>Polling interval (seconds)<input type="number" min={minimum} max={3600} value={draft.intervalSeconds} onChange={e=>set('intervalSeconds',+e.target.value)}/></label>
+        <label>Polling interval (seconds)<input type="number" min={minimum} max={3600} required value={draft.intervalSeconds} onChange={e=>set('intervalSeconds',+e.target.value)}/>
+          <small className="subtle">Default {DEFAULT_POLL_SECONDS} seconds · Minimum {minimum} seconds</small>
+        </label>
         <label>Daily notification cap<input type="number" min={0} max={1000} value={draft.dailyCap} onChange={e=>set('dailyCap',+e.target.value)}/></label>
         <label className="check"><input type="checkbox" checked={draft.nativeNotifications} onChange={e=>set('nativeNotifications',e.target.checked)}/> Desktop notifications</label>
         <label className="check"><input type="checkbox" checked={draft.simulatedNotifications} onChange={e=>set('simulatedNotifications',e.target.checked)}/> Allow desktop notifications for simulated posts</label>

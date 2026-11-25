@@ -4,10 +4,10 @@ import Link from 'next/link';
 import {Activity,ArrowRight,Bell,Bookmark,ChevronRight,CircleAlert,Database,ExternalLink,LayoutGrid,ListFilter,Menu,Pause,Play,Plus,Radar,Settings2,Signal,Target,X,Zap} from 'lucide-react';
 import {useCallback,useEffect,useRef,useState,type ReactNode} from 'react';
 import {collectorLabel,type Alert,type CollectorId,type HistoryCollectorId,type Overview,type Post,type Settings,type Source,type SourceInfo,type Watchlist} from '../../../packages/contracts/index';
-import {authenticate,label,request,timestamp} from './client';
+import {authenticate,label,monitoringLabel,nextCollection,request,timestamp} from './client';
 import {Mascot} from './mascot/mascot';
 import {Watchlists} from './watchlists';
-import {CoverageFields,SettingsPage,SourcesPage} from './preferences';
+import {CoverageFields,RequestUsageFields,SettingsPage,SourcesPage} from './preferences';
 
 export type Page='overview'|'watchlists'|'feed'|'notifications'|'sources'|'settings';
 const nav=[
@@ -60,6 +60,11 @@ export function Workspace({page}:{page:Page}) {
     }).catch(error=>{if(!disposed)setError(error.message);});
     return ()=>{disposed=true;stream?.close();clearTimeout(debounce);};
   },[refresh]);
+  useEffect(()=>{
+    if(page!=='overview'&&page!=='sources')return;
+    const timer=setInterval(()=>{if(!document.hidden)void refresh().catch(()=>{});},30_000);
+    return ()=>clearInterval(timer);
+  },[page,refresh]);
   const run=useCallback(async(work:()=>Promise<unknown>,message?:string)=>{
     setBusy(true);setError('');
     try {await work();await refresh();setUpdates(n=>n+1);if(message)setNotice(message);return true;}
@@ -68,7 +73,7 @@ export function Workspace({page}:{page:Page}) {
   },[refresh]);
   const status=base?.overview.status;
   const toggle=async()=>{
-    if(await run(()=>request('/monitor','PUT',{paused:!status?.paused}),status?.paused?'Monitoring resumed.':'Monitoring paused.') && status?.paused) setCelebrate(true);
+    if(status&&await run(()=>request('/monitor','PUT',{paused:!status.paused}),status.paused?'Monitoring resumed.':'Monitoring paused.')&&status.paused)setCelebrate(true);
   };
   function open(post:{namespace:Source;id:string}) {
     setDetail({source:post.namespace,id:post.id});
@@ -87,11 +92,15 @@ export function Workspace({page}:{page:Page}) {
     </aside>
     <main id="main" className="main">
       <header className="topbar"><span className="crumb">Workspace <ChevronRight size={15}/> {nav.find(n=>n.id===page)?.title}</span>
-        {status&&<span className={`status-pill ${status.paused?'waiting':''}`}><span className="dot"/>{collectorLabel[status.source]} · {status.paused?'Paused':status.status}</span>}
+        {status&&base&&<div className="monitor-controls">
+          <span className={`status-pill ${status.paused?'waiting':''}`}><span className="dot"/>{collectorLabel[status.source]} · {monitoringLabel(status)}</span>
+          <button className={`button${status.paused?' primary':''}`} disabled={busy||(status.paused&&!base.lists.some(l=>l.enabled))} onClick={toggle}>
+            {status.paused?<Play size={17}/>:<Pause size={17}/>} {status.paused?'Start monitoring':'Pause monitoring'}
+          </button>
+        </div>}
       </header>
       <div className="content">
         <header className="heading"><div><h1>{title[page][0]}</h1><p>{title[page][1]}</p></div>
-          {base&&page==='overview'&&<button className="button primary" disabled={busy||(status?.paused&&!base.lists.some(l=>l.enabled))} onClick={toggle}>{status?.paused?<Play size={17}/>:<Pause size={17}/>} {status?.paused?'Start monitoring':'Pause monitoring'}</button>}
         </header>
         {!connected&&<div className="banner" role="status"><CircleAlert size={18}/> Live connection interrupted. Showing the last available data.</div>}
         {error&&<div className="banner error" role="alert"><CircleAlert size={18}/><span>{error}</span>{base&&<button className="icon-button" aria-label="Dismiss error" onClick={()=>setError('')}><X size={16}/></button>}</div>}
@@ -99,7 +108,7 @@ export function Workspace({page}:{page:Page}) {
         {!base&&!error&&<div className="panel empty">Connecting to the local service…</div>}
         {!base&&error&&<div className="panel empty"><Radar size={32}/><h2>Open your workspace</h2><p>Run <code>npm run monitor -- open</code> from the project folder to open a local session.</p></div>}
         {base&&page==='overview'&&<Dashboard base={base} updates={updates} open={open} celebrate={celebrate}/>}
-        {base&&page==='watchlists'&&<Watchlists lists={base.lists} paused={base.overview.status.paused} run={run} busy={busy}/>}
+        {base&&page==='watchlists'&&<Watchlists lists={base.lists} run={run} busy={busy}/>}
         {base&&page==='feed'&&<Feed source={base.overview.status.source} lists={base.lists} updates={updates} open={open}/>}
         {base&&page==='notifications'&&<Notifications source={base.overview.status.source} updates={updates} run={run} open={open} busy={busy}/>}
         {base&&page==='sources'&&<SourcesPage sources={base.sources} monitor={base.overview.status} reduced={base.settings.reduceMotion} run={run} busy={busy}/>}
@@ -116,6 +125,7 @@ function Dashboard({base,updates,open,celebrate}:{base:Base;updates:number;open:
   const [posts,setPosts]=useState<Post[]>([]),[recent,setRecent]=useState<Alert[]>([]);
   const [failure,setFailure]=useState('');
   const o=base.overview, status=o.status;
+  const usage=base.sources.find(source=>source.id===status.source)?.requestUsage;
   useEffect(()=>{
     let active=true;
     void Promise.all([request<PageData<Post>>(`/posts?collector=${status.source}&sort=score&limit=6`),request<PageData<Alert>>(`/notifications?collector=${status.source}&limit=3`)])
@@ -143,7 +153,10 @@ function Dashboard({base,updates,open,celebrate}:{base:Base;updates:number;open:
         <section className="panel collector">
           <div className="panel-heading"><div><h2>Collector health</h2><p>{collectorLabel[status.source]}</p></div><Signal size={18}/></div>
           <Mascot mode={status.error?'SAD':celebrate?'CELEBRATING':base.lists.length?'IDLE':'GREETING'} reduced={base.settings.reduceMotion}/>
-          <dl className="fields"><div><dt>State</dt><dd>{status.paused?'Paused':status.status}</dd></div><div><dt>Last collection success</dt><dd>{timestamp(status.lastSuccess)}</dd></div><div><dt>Next check</dt><dd>{timestamp(status.nextDue)}</dd></div><div><dt>Interval</dt><dd>{status.intervalSeconds/60} min</dd></div></dl>
+          <dl className="fields"><div><dt>State</dt><dd>{monitoringLabel(status)}</dd></div><div><dt>Last collection success</dt><dd>{timestamp(status.lastSuccess)}</dd></div>
+            <div><dt>Next scheduled collection</dt><dd>{nextCollection(status.nextDue,status.status==='Collecting',usage?.heldUntil)}</dd></div>
+            <div><dt>Interval</dt><dd>{status.intervalSeconds} sec</dd></div><RequestUsageFields usage={usage}/>
+          </dl>
           <CoverageFields coverage={status.coverage}/>
           {status.error&&<p className="warning">{status.error}</p>}{status.gap&&<p className="warning">{status.gap}</p>}
           <Link className="text-link" href="/sources/">Source details <ArrowRight size={15}/></Link>
@@ -156,16 +169,29 @@ function Dashboard({base,updates,open,celebrate}:{base:Base;updates:number;open:
   </>;
 }
 function PostRow({post,open}:{post:Post;open:Open}) {
-  const match=post.matches[0],author=post.displayName??post.handle??(post.simulated?'Simulated author':'X post');
+  const match=post.matches[0],author=post.displayName??(post.handle?`@${post.handle}`:post.simulated?'Simulated author':`X post · ID ${post.id}`);
+  const metrics=Object.entries(post.metrics).filter(([,value])=>value!=null);
+  const media=(['photo','video','gif'] as const).flatMap(kind=>{
+    const count=post.media?.filter(item=>item.kind===kind).length??0;
+    return count?[`${count} ${kind==='gif'?'GIF':kind}${count===1?'':'s'}`]:[];
+  });
   return <article className="post-row">
     <div className="avatar" aria-hidden="true">{author.split(/\s+/).slice(0,2).map(v=>v[0]).join('')}</div>
     <button className="post-body" onClick={()=>open(post)}>
-      <span className="post-meta"><strong>{author}</strong>{post.handle&&<span>@{post.handle}</span>}<span>{timestamp(post.createdAt??post.observedAt)}</span>{post.simulated&&<span className="chip mini">Simulated</span>}{post.preview==='user-shared'&&<span className="chip mini">User-shared excerpt</span>}{post.preview==='manual-import'&&<span className="chip mini">Manual import</span>}</span>
-      <span className="post-copy">{post.text??(post.preview==='unresolved'?`Unresolved X post · ID ${post.id}`:post.preview==='stale'?'Cached X metadata expired':'Preview opens on X')}</span>
+      <span className="post-meta"><strong>{author}</strong>{post.handle&&post.displayName&&<span>@{post.handle}</span>}
+        <span>{post.createdAt===null?'Collected ':''}{timestamp(post.createdAt??post.observedAt)}</span>
+        {post.simulated&&<span className="chip mini">Simulated</span>}{post.preview==='user-shared'&&<span className="chip mini">User-shared excerpt</span>}{post.preview==='manual-import'&&<span className="chip mini">Manual import</span>}
+      </span>
+      <span className="post-copy">{post.text??(post.preview==='stale'?'Cached X preview expired':'Post text unavailable')}</span>
+      {!!media.length&&<span className="post-meta">{media.join(' · ')}</span>}
+      {!!metrics.length&&<span className="post-counters">{metrics.map(([key,value])=><span key={key}><strong>{value?.toLocaleString()}</strong> {key}</span>)}</span>}
       {post.collector&&post.collector!=='mock'&&<span className="subtle">{collectorLabel[post.collector]}</span>}
       <span className="post-reason">{match ? <><Target size={14}/> {match.listName}{post.matches.length>1?' +' + (post.matches.length-1):''} · {match.matched.join(', ')}</>:post.preview==='unresolved'?'Awaiting authorized content for matching':'No active match'}</span>
     </button>
-    {match&&<span className={`score ${match.classification}`} title={label(match.classification)}><strong>{match.score}</strong><small>score</small></span>}
+    {(match||post.originalUrl)&&<div className="post-actions">
+      {match&&<span className={`score ${match.classification}`} title={label(match.classification)}><strong>{match.score}</strong><small>score</small></span>}
+      {post.originalUrl&&<a className="button" href={post.originalUrl} target="_blank" rel="noreferrer">Open on X <ExternalLink size={15}/></a>}
+    </div>}
   </article>;
 }
 const blankFilters={q:'',listId:'',priority:'',kind:'',sort:'recent'};
@@ -295,15 +321,20 @@ function PostDetail({selection,embeds,onClose,run}:{selection:{source:Source;id:
     {error&&<p className="banner error">{error}</p>}
     {!post&&!error&&<p>Loading match…</p>}
     {post&&<>
-      <div className="post-meta"><strong>{post.displayName??'X post'}</strong>{post.handle&&<span>@{post.handle}</span>}{post.simulated&&<span className="chip">Simulated</span>}</div>
+      <div className="post-meta"><strong>{post.displayName??(post.handle?`@${post.handle}`:post.simulated?'Simulated author':`X post · ID ${post.id}`)}</strong>{post.handle&&post.displayName&&<span>@{post.handle}</span>}{post.simulated&&<span className="chip">Simulated</span>}</div>
       {post.preview==='user-shared'&&<p className="subtle">User-shared excerpt</p>}
       {post.preview==='manual-import'&&<p className="subtle">Manual import</p>}
-      <p>{post.text??'Open the original on X to read this post.'}</p>
+      <p className="detail-copy">{post.text??'Post text unavailable here.'}</p>
       {post.preview==='unresolved'&&!post.matches.length&&<p className="subtle">The monitor is awaiting authorized post content before evaluating watchlist rules.</p>}
       {post.preview==='stale'&&<p className="subtle">Cached X metadata has expired. Open the original for the current post.</p>}
-      <p className="subtle">Created {timestamp(post.createdAt)} · Collected {timestamp(post.observedAt)} · {post.kind}</p>
+      <p className="subtle">{post.createdAt!==null&&<>Posted {timestamp(post.createdAt)} · </>}Collected {timestamp(post.observedAt)}{post.kind!=='unknown'&&` · ${post.kind}`}{post.language&&` · ${post.language}`}</p>
       {!!post.provenance?.length&&<p className="subtle">Sources · {post.provenance.map(id=>collectorLabel[id]).join(', ')}</p>}
-      {post.originalUrl&&<a className="button" href={post.originalUrl} target="_blank" rel="noreferrer">Open original <ExternalLink size={16}/></a>}
+      {post.originalUrl&&<a className="button" href={post.originalUrl} target="_blank" rel="noreferrer">Open on X <ExternalLink size={16}/></a>}
+      {!!post.media?.length&&<details className="explain"><summary>Media ({post.media.length})</summary>
+        {post.media.map(({kind,width,height,alt,durationMs},index)=><p key={index}>{kind==='gif'?'GIF':kind}
+          {width!==null&&height!==null&&` · ${width} × ${height}`}{durationMs!==null&&` · ${durationMs/1000} s`}{alt&&` · ${alt}`}
+        </p>)}
+      </details>}
       {embeds&&post.originalUrl&&<details className="explain"><summary>Official X embed</summary>
         <p>Loading the embed connects to X. X may receive viewing and device information for its own services, personalization, or advertising. Manage those uses in your X privacy settings.</p>
         {showEmbed?<iframe title="Official X post" src={`/api/v1/embed/x/${encodeURIComponent(post.id)}`} sandbox="allow-scripts" referrerPolicy="no-referrer" width="100%" height="380"/>:
