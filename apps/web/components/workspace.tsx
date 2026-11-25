@@ -103,7 +103,7 @@ export function Workspace({page}:{page:Page}) {
         {base&&page==='feed'&&<Feed source={base.overview.status.source} lists={base.lists} updates={updates} open={open}/>}
         {base&&page==='notifications'&&<Notifications source={base.overview.status.source} updates={updates} run={run} open={open} busy={busy}/>}
         {base&&page==='sources'&&<SourcesPage sources={base.sources} monitor={base.overview.status} reduced={base.settings.reduceMotion} run={run} busy={busy}/>}
-        {base&&page==='settings'&&<SettingsPage settings={base.settings} run={run} busy={busy}/>}
+        {base&&page==='settings'&&<SettingsPage settings={base.settings} run={run} busy={busy} localX={base.overview.status.source==='session'}/>}
       </div>
     </main>
     {base&&detail&&<PostDetail key={detail.source+':'+detail.id} selection={detail} embeds={base.settings.officialEmbeds} onClose={close} run={run}/>}

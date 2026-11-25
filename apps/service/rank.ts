@@ -30,7 +30,7 @@ export function scorePost(post:Candidate, rule:Rule, settings:Settings, factors:
   const relevance = .4 + .4 * matched.length / included.length
     + (matched.some(t => t.kind === 'phrase') ? .1 : 0)
     + (matched.some(t => t.important || settings.importantTerms.some(x => normalize(x) === termKey(t))) ? .1 : 0);
-  const popularity = (Object.keys(references) as (keyof Metrics)[]).flatMap(key => {
+  const popularity = (Object.keys(references) as (keyof typeof references)[]).flatMap(key => {
     const count = post.metrics[key];
     return count === null ? [] : [Math.min(1,Math.log1p(count)/Math.log1p(references[key]))];
   });

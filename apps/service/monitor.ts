@@ -27,8 +27,9 @@ export class Monitor {
     const state=collector?.availabilityStatus??row.status;
     return {paused:this.store.paused,source:row.id,status:this.store.paused?'Paused':state,
       lastSuccess:row.last_success_at,nextDue:this.store.paused||!Number.isFinite(due)||due===Number.MAX_SAFE_INTEGER||!this.store.lists.some(l=>l.enabled)?null:due,
-      error:row.error_code,gap:row.gap,intervalSeconds:this.store.settings.intervalSeconds,coverage:this.store.coverage(row.id)};
+      error:row.error_code,gap:row.gap,intervalSeconds:this.intervalSeconds(row.id),coverage:this.store.coverage(row.id)};
   }
+  private intervalSeconds(source:CollectorId){return Math.max(source==='session'?120:60,this.store.settings.intervalSeconds);}
   private pollDue(source:CollectorId) {
     const collector=this.sources.get(source);
     return collector?Math.max(this.store.value(`next:${source}`,0),collector.nextAllowedAt??0):Infinity;
@@ -43,7 +44,7 @@ export class Monitor {
     const alert=this.store.get<{due:number|null}>("SELECT min(due_at) AS due FROM monitoring_jobs WHERE collector=? AND type='alert'",source)?.due;
     const recheck=this.store.get<{due:number|null}>("SELECT min(due_at) AS due FROM monitoring_jobs WHERE collector=? AND type='recheck'",source)?.due;
     const poll=this.store.lists.some(l=>l.enabled)?this.pollDue(source):Infinity;
-    const lookup=collector?.lookup?Math.max(recheck??Infinity,collector.nextAllowedAt??0):Infinity;
+    const lookup=collector?.lookup?Math.max(recheck??Infinity,collector.nextAllowedAt??0,collector.nextLookupAt??0):Infinity;
     const due=this.store.paused?Infinity:Math.min(poll,alert??Infinity,lookup);
     const timeout=Math.min(Math.max(100,due-this.clock()),60_000);
     this.timer=setTimeout(()=>void this.tick().finally(()=>this.wake()),timeout);
@@ -92,7 +93,7 @@ export class Monitor {
     if (this.store.paused) return;
     const lists=this.store.lists.filter(l=>l.enabled);
     if (lists.length && collector && now>=this.pollDue(source)) {
-      const next=now+1000*settings.intervalSeconds;
+      const next=now+1000*this.intervalSeconds(source);
       this.store.changeCoverage(source,{lastAttempt:now,pages:0,posts:0});
       const success=await collector.collect(lists,now,signal,this.commit(source,lists,signal));
       if (signal.aborted) return;
@@ -106,7 +107,7 @@ export class Monitor {
       this.signal('posts.changed','overview.changed','source.changed');
     }
     if (signal.aborted) return;
-    if(now>=(collector?.nextAllowedAt??0))await this.recheck(source,collector,lists,now,signal);
+    if(now>=Math.max(collector?.nextAllowedAt??0,collector?.nextLookupAt??0))await this.recheck(source,collector,lists,now,signal);
     if (signal.aborted) return;
     for (const job of this.store.jobs('alert',source,now)) {
       if (signal.aborted || this.store.paused) break;

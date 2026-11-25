@@ -81,6 +81,10 @@ async function ensureWorker(){
       const reply=result=>{if(child.connected)child.send({type:'browser-account-result',id:message.id,result});};
       void account(message).then(reply,()=>reply(null));
     }
+    if(message?.type==='collection-credentials'&&/^[\da-f-]{36}$/i.test(message.id)&&typeof message.remembered==='boolean'){
+      const reply=result=>{if(child.connected)child.send({type:'browser-account-result',id:message.id,result});};
+      void account.collectionCredentials(message.remembered).then(reply,()=>reply(null));
+    }
     if(message?.type==='activate'){
       if(typeof message.url==='string'&&allowX(message.url))void shell.openExternal(message.url);
       else if(typeof message.id==='string'&&/^[\w-]{1,100}$/.test(message.id))void openWindow({post:message.id,source:message.source==='x'?'x':'mock'}).catch(report);

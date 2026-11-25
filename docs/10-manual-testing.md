@@ -5,18 +5,21 @@ Use Node.js 24.15 or newer in the 24.x series for source builds. Run `npm ci` an
 ## Test A — Local X Account
 
 1. In the desktop app, open **Data sources → Open X sign-in**. Select **Remember my sign-in** first if you want restoration on a trusted device. Complete any email verification or MFA directly in the X window.
-2. Choose **Check browser session** in Smart Monitor. In the X window choose **Profile** from X’s navigation. When your profile shows **Edit profile**, return to Smart Monitor and choose **Confirm my X profile**. Smart Monitor takes the handle from the profile URL and marks the browser sign-in **Confirmed by you**. **Session collection** remains **Unsupported**.
+2. Choose **Check browser session** in Smart Monitor. In the X window choose **Profile** from X’s navigation. When your profile shows **Edit profile**, return to Smart Monitor and choose **Confirm my X profile**. Smart Monitor takes the handle from the profile URL and marks the browser sign-in **Confirmed by you**. With live opt-in disabled, **Session collection** remains **Unsupported**.
 3. Quit and relaunch. The previously confirmed handle should appear automatically for the same saved session. An older installation or a replaced session cookie may need one profile confirmation. If X shows a challenge or restriction, follow its instructions. A Google-linked account can use an alternate email or password method when X offers it. [Google OAuth policy](https://developers.google.com/identity/protocols/oauth2/policies#secure-browser)
 4. Choose **Disconnect browser**. Verify that reopening asks you to sign in. The action clears the app's X browser data.
 5. Copy a direct X post permalink and an excerpt, then choose **Share selected X post** and confirm local storage. Verify the excerpt appears in Post details as **User-shared** and creates no keyword notification.
 
-For the Local X Account regression, run `node --import tsx --test tests/session.test.ts` and `npm run test:desktop:dev -- --account-only` after building. Real keyword collection needs an X-authorized session endpoint or integration covering search and pagination, plus explicit access to following and likes for those signals. X's documented collection APIs use developer credentials. [X Automation Rules](https://help.x.com/en/rules-and-policies/x-automation)
+For the Local X Account regression, run `node --import tsx --test tests/session.test.ts` and `npm run test:desktop:dev -- --account-only` after building. For real keyword collection, use the [authorized desktop launch steps](../README.md#authorized-live-collection-on-windows).
+
+After [Python setup](../README.md#python-setup-for-twscrape), run `node --import tsx --test tests/twscrape-worker.test.ts` to verify the worker protocol, cancellation, and manual import. In PowerShell, run `& .\.local\twscrape-venv\Scripts\python.exe -I -B tests/twscrape_policy_test.py .local/temp` to check the request guard with local fixtures.
 
 ## Test B — Manual posts
 
 1. Create and enable a watchlist. In **Data sources → Local X Account**, choose **Import posts → Download JSON example**. Edit the array using the [JSON format](03-collection.md).
 2. Choose the JSON file, confirm local storage, and select **Import selected file**. Select **View manual posts**. Verify the new post is marked **Manual import** and any watchlist matches show their score. The import should create no alert.
 3. Reimport the same file. Confirm there is one feed row per post. Change a supplied metric and import the new observation to see it in Post details.
+4. Repeat with a twscrape `.jsonl` export. Check that its post appears under **Manual X imports**, its available engagement counters are preserved, and the import creates no alert.
 
 ## Test C — Regression and desktop notifications
 

@@ -25,13 +25,43 @@ The app listens on loopback and issues a short-lived, single-use launcher URL. U
 
 ## Collection modes
 
-- **Local X Account** opens a separate desktop window for manual X sign-in. Manual email verification and multifactor prompts belong to X. Automatic X search requires an approved interface. Use **Share selected X post** or **Import posts** to score user-selected records locally.
+- **Local X Account** opens a separate desktop window for manual X sign-in. Automatic collection requires an X-approved interface. Use **Share selected X post** or **Import posts** to score user-selected records locally.
 
 - **Simulated** uses local seeded posts for testing. **Replay simulation** schedules fresh fixture IDs. Native toasts require the simulated-notifications opt-in.
 
 Keep a stopped profile backup before upgrading. Schema 6 preserves historical posts, scores, feedback and alerts. A profile using a retired collector opens with simulation paused. View saved history using the Feed or Notifications source filter. Use `npm run monitor -- cleanup-retired-credentials --confirm` to clear credentials from retired sources.
 
 [Local collection and JSON format](docs/03-collection.md) · [Manual tests](docs/10-manual-testing.md)
+
+### Python setup for twscrape
+
+Run from the checkout in PowerShell with Python 3.10 or newer.
+
+~~~powershell
+New-Item -ItemType Directory -Force .local\temp | Out-Null
+$env:TEMP = (Resolve-Path .local\temp).Path
+$env:TMP = $env:TEMP
+python -m venv .local\twscrape-venv
+& .\.local\twscrape-venv\Scripts\python.exe -m pip --isolated install --no-cache-dir -r apps\service\python\requirements.txt
+~~~
+
+In **Data sources → Local X Account → Import posts**, select a `.jsonl` file of twscrape post records you have permission to use, up to 50 posts or 60 KB. The import runs locally, applies watchlists and ranking, and creates no notifications.
+
+### Authorized live collection on Windows
+
+Use this launch option only on an account authorized for automated reads through twscrape. Quit an already-running desktop instance from the tray before launching.
+
+~~~powershell
+npm.cmd run build
+$env:MONITOR_TWSCRAPE_LIVE = '1'
+npm.cmd run start -w @monitor/desktop
+~~~
+
+In **Data sources → Local X Account**, sign in, confirm your X profile, and select **Enable collection → Use Local X Account**. Create an enabled watchlist and resume monitoring on the Dashboard. Check **Last successful collection**, **Collected posts**, and **Post feed → Local X Account** to verify results. Leave the flag unset to use browser sign-in and manual imports alone.
+
+The adapter uses the current confirmed Electron session. Request limits are shared across operations in the local profile and survive restarts and reconnects. The app uses one account at a time. Following sync includes up to 100 accounts per day. Live liked-post retrieval is unavailable in the pinned package.
+
+The service uses the venv path above. Set `MONITOR_PYTHON` to an absolute interpreter path for a different local Python environment. Desktop packaging stages the worker script with the service. The launcher can use a future bundled interpreter under `resources/python-runtime`, but the current package does not include Python.
 
 ## Package and verify
 

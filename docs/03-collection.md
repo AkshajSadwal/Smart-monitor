@@ -2,7 +2,9 @@
 
 **Local X Account** uses an isolated desktop X window for manual sign-in. Remembered sessions and confirmed handles stay on the device. **Simulated** provides test posts and engagement changes for exercising watchlists and alerts.
 
-X's documented search requires developer API authentication. X prohibits scripting its website, and no approved interface that accepts the browser session has been configured. Browser-cookie import, automated search, pagination, following, and liked-author retrieval are unavailable. The twscrape source separates account handling, pagination, parsing and storage. Its website GraphQL operations do not establish permission for Smart Monitor to use them. [X Automation Rules](https://help.x.com/en/rules-and-policies/x-automation) · [X Search API](https://docs.x.com/x-api/posts/search-recent-posts) · [twscrape source](https://github.com/vladkens/twscrape/blob/main/twscrape/api.py)
+Authorized desktop deployments can opt in to the [twscrape driver](../README.md#authorized-live-collection-on-windows). It uses one confirmed Electron account. The worker sends requests directly to X, maintains no separate account database, and stops on challenges, restrictions, or expired sessions.
+
+Search defaults to every five minutes with a two-minute minimum. Each search uses up to two pages or 40 posts. A rolling budget allows 60 requests per hour and 600 per day, including worker setup requests. The budget and upstream holds persist in the local profile. Only one request is in flight. Engagement rechecks run at most every 15 minutes and prioritize posts with pending rechecks. Following refresh runs every 24 hours and stores up to 100 following records. Liked-post signals remain unavailable.
 
 ## Manual imports
 

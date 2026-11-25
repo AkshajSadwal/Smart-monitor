@@ -3,11 +3,12 @@ import staticFiles from '@fastify/static';
 import { existsSync } from 'node:fs';
 import { randomBytes,timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { browserActionSchema,collectorSchema,feedbackSchema,historyCollectorSchema,kindSchema,namespaceSchema,preferencesSchema,settingsSchema,unknownMetrics,watchlist,type BrowserAccount,type BrowserAction,type Candidate,type SourceInfo } from '../../packages/contracts/index';
+import { browserActionSchema,collectorSchema,feedbackSchema,historyCollectorSchema,kindSchema,namespaceSchema,preferencesSchema,settingsSchema,unknownMetrics,watchlist,type BrowserAccount,type BrowserAction,type Candidate,type Post,type SourceInfo } from '../../packages/contracts/index';
 import { localTime,scorePost } from './rank';
 import { hash,postSelect,type PostRow } from './storage';
 import type { Monitor } from './monitor';
 import type {WebsiteSession} from './website-session';
+import type {TwscrapeWorker} from './twscrape-worker';
 import {selectedPost,importedPosts} from './manual-posts';
 
 const nonce=()=>randomBytes(32).toString('base64url');
@@ -26,6 +27,7 @@ export function createApi(monitor:Monitor,options:{
   webRoot?:string;profile:string;controlToken:string;stop:()=>void;
   browserAccount?:(action:BrowserAction)=>Promise<BrowserAccount>;
   website?:WebsiteSession;
+  twscrape?:TwscrapeWorker;
   cleanupRetiredCredentials?:()=>Promise<void>;
   erase:()=>Promise<void>;
 }) {
@@ -45,6 +47,9 @@ export function createApi(monitor:Monitor,options:{
   let origin='';
   const bootstrap=new Map<string,number>();
   const sessions=new Map<string,Session>();
+  let importJob:AbortController|undefined;
+  let erasing=false;
+  api.addHook('preClose',async()=>{importJob?.abort();});
   const attached=new WeakMap<FastifyRequest,Session>();
   const epoch=nonce().slice(0,12);
   const cookieName=`monitor_${epoch}`;
@@ -230,12 +235,14 @@ export function createApi(monitor:Monitor,options:{
     const now=monitor.clock();
     return {items:page.map(row=>store.post(row,false,now)),cursor:rows.length>query.limit&&last?Buffer.from(JSON.stringify({key,value:last.sort_value,id:last.id})).toString('base64url'):null};
   });
-  function saveManualPosts(posts:Candidate[],kind:'user-shared'|'manual-import',now:number){
+  function saveManualPosts(posts:(Candidate&{media?:Post['media']|null})[],kind:'user-shared'|'manual-import',now:number){
     const lists=store.lists.filter(list=>list.enabled);
     const ids=store.db.transaction(()=>posts.flatMap(post=>{
       const id=monitor.ingest(post,lists,now,false,true);
       if(!id)return [];
-      store.run("INSERT INTO post_display VALUES ('x',?,json_object('shared',?,'manual',?)) ON CONFLICT(namespace,post_id) DO UPDATE SET metadata=json_patch(post_display.metadata,excluded.metadata)",id,post.text,kind);
+      const display={shared:post.text,manual:kind,
+        ...(post.displayName?{displayName:post.displayName}:{}),...(post.media?{media:post.media}:{})};
+      store.run("INSERT INTO post_display VALUES ('x',?,?) ON CONFLICT(namespace,post_id) DO UPDATE SET metadata=json_patch(post_display.metadata,excluded.metadata)",id,JSON.stringify(display));
       return [id];
     }))();
     if(ids.length)monitor.signal('posts.changed','overview.changed','source.changed');
@@ -247,8 +254,34 @@ export function createApi(monitor:Monitor,options:{
     if(!id)throw missing();
     return res.status(201).send(store.post(store.row('x',id)!,false,now));
   });
-  api.post('/api/v1/posts/import',(req,res)=>{
-    const now=monitor.clock(),posts=importedPosts(req.body,now);
+  async function normalizeExport(input:unknown,now:number,requestSignal:AbortSignal){
+    const {twscrape:text}=z.strictObject({twscrape:z.string().min(1).max(60*1024),consent:z.literal(true)}).parse(input);
+    if(Buffer.byteLength(text)>60*1024)throw new ApiError(413,'IMPORT_TOO_LARGE','Choose an export up to 60 KB.');
+    if(!options.twscrape)throw new ApiError(503,'PYTHON_UNAVAILABLE','Set up the local Python worker first.');
+    if(importJob)throw new ApiError(409,'IMPORT_IN_PROGRESS','Wait for the current twscrape import to finish.');
+    importJob=new AbortController();
+    const signal=AbortSignal.any([requestSignal,importJob.signal]);
+    try {
+      const batch=await options.twscrape.normalize(text,now,signal);
+      signal.throwIfAborted();
+      return batch.map(post=>({
+        ...post,collector:'manual' as const,observation:'manual:twscrape:'+hash(JSON.stringify({...post,observedAt:null})),
+      }));
+    } catch(error) {
+      if(signal.aborted)throw new ApiError(409,'IMPORT_CANCELLED','The import was cancelled.');
+      if(error instanceof z.ZodError||(error instanceof Error&&error.message==='Invalid request'))
+        throw new ApiError(400,'INVALID_TWSCRAPE_EXPORT','Choose a twscrape JSONL export with up to 50 valid post records.');
+      throw new ApiError(503,'PYTHON_UNAVAILABLE','The local Python worker is unavailable. Check your Python setup.');
+    } finally {importJob=undefined;}
+  }
+  api.post('/api/v1/posts/import',{bodyLimit:128*1024},async(req,res)=>{
+    if(erasing)throw new ApiError(409,'PROFILE_ERASING','The local profile is being erased.');
+    const now=monitor.clock(),input=req.body;
+    const posts=typeof input==='object'&&input&&'twscrape' in input
+      ? await normalizeExport(input,now,req.signal)
+      : importedPosts(input,now);
+    if(new Set(posts.map(post=>post.id)).size!==posts.length)
+      throw new ApiError(400,'DUPLICATE_IMPORT','Include each post at most once per import. Import a later observation in a separate file.');
     const ids=saveManualPosts(posts,'manual-import',now);
     return res.status(201).send({saved:ids.length,skipped:posts.length-ids.length});
   });
@@ -331,6 +364,10 @@ export function createApi(monitor:Monitor,options:{
     const patch=z.record(z.string(),z.unknown()).parse(req.body);
     const previous=store.settings;
     const preferences=settingsSchema.parse({...previous,...patch});
+    if(store.active.id==='session'&&preferences.intervalSeconds<120){
+      if('intervalSeconds' in patch)throw new ApiError(400,'X_POLL_INTERVAL','Set the Local X Account polling interval to at least 120 seconds.');
+      preferences.intervalSeconds=120;
+    }
     store.db.transaction(()=>{
       if (previous.quiet.zone!==preferences.quiet.zone) {
         const now=monitor.clock();
@@ -354,31 +391,74 @@ export function createApi(monitor:Monitor,options:{
     monitor.signal('settings.changed','overview.changed','source.changed','posts.changed');
     return {...preferences,revision:store.revision('preferences')};
   });
-  api.get('/api/v1/sources',():SourceInfo[]=>{
+  api.get('/api/v1/sources',async():Promise<SourceInfo[]>=>{
+    const pythonWorker=await options.twscrape?.status();
     return store.sources.map(row=>{
       const browser=row.id==='session'?browserState:undefined;
       const session=row.id==='session'?options.website?.state:undefined;
       const status=monitor.status;
-      const supported=session?.status!=='Unsupported';
+      const supported=row.id!=='session'||(!!session&&session.status!=='Unsupported');
       const postCount=store.count(`SELECT count(*) n FROM post_sources s JOIN posts p ON p.namespace=s.namespace AND p.id=s.post_id
         WHERE s.collector=? AND (?<>'session' OR (p.observation NOT LIKE 'user-shared:%' AND p.observation NOT LIKE 'manual:%'))`,row.id,row.id);
       return {
         id:row.id,active:!!row.active,configured:supported&&!!row.configured,status:session?.status??row.status,error:supported?row.error_code:null,
         lastSuccess:row.last_success_at,nextDue:row.active&&supported?status.nextDue:null,postCount,gap:row.gap,coverage:store.coverage(row.id),capabilities:[...(monitor.sources.get(row.id)?.capabilities??[])],
-        ...(browser?{browser:{...browser,available:!!options.browserAccount},account:session?.handle??(browser.status==='Connected'?browser.handle:null),manualPosts:store.count("SELECT count(*) n FROM post_sources WHERE collector='manual'")}:{}),
+        ...(browser?{browser:{...browser,available:!!options.browserAccount},account:browser.status==='Connected'?browser.handle:null,pythonWorker,manualPosts:store.count("SELECT count(*) n FROM post_sources WHERE collector='manual'")}:{}),
       };
     });
   });
   api.post('/api/v1/sources/session/browser',async req=>{
     if(!options.browserAccount)throw new ApiError(409,'DESKTOP_REQUIRED','Open the Smart Monitor desktop app to use the local X sign-in window.');
     const action=browserActionSchema.parse(req.body);
+      if (action.action === 'disconnect') {
+        monitor.invalidate();
+        await options.website?.disconnect();
+      }
     const result=await options.browserAccount(action);
     setBrowserAccount(result);
     return result;
   });
+  api.post('/api/v1/sources/session/connect', async () => {
+    if (!options.website) {
+      throw new ApiError(
+        503,
+        'COLLECTION_UNAVAILABLE',
+        'Local collection is unavailable.'
+      );
+    }
+
+    if (options.website.state.status === 'Unsupported') {
+      throw new ApiError(
+        403,
+        'WEBSITE_PERMISSION_REQUIRED',
+        'An authorized website collection interface is required.'
+      );
+    }
+
+    if (browserState.status !== 'Connected') {
+      throw new ApiError(
+        401,
+        'AUTHENTICATION_REQUIRED',
+        'Sign in and confirm your X account first.'
+      );
+    }
+
+    monitor.invalidate();
+
+    try {await options.website.connect(AbortSignal.timeout(20000));}
+    finally {
+      monitor.wake();
+      monitor.signal('source.changed','overview.changed');
+    }
+
+    return {
+      status: options.website.state.status,
+    };
+  });
   api.put('/api/v1/sources/:id/active',async req=>{
     const {id}=choice.parse(req.params);
     if(id==='session'&&options.website?.state.status==='Unsupported')throw new ApiError(409,'SOURCE_NOT_READY','An authorized X collection interface is not available.');
+    if(id==='session'&&options.website?.nextAllowedAt===Infinity)throw new ApiError(409,'SOURCE_NOT_READY','Reconnect your collection session before selecting it.');
     if (id===store.active.id) return monitor.status;
     if(!store.sources.find(s=>s.id===id)?.configured||!monitor.sources.get(id))throw new ApiError(409,'SOURCE_NOT_READY','Configure and authorize this source before selecting it.');
     monitor.invalidate();
@@ -421,9 +501,14 @@ export function createApi(monitor:Monitor,options:{
     const {nonce:key}=z.strictObject({nonce:z.string().length(43),confirm:z.literal('ERASE')}).parse(req.body);
     const session=attached.get(req)!;
     if (session.erase?.nonce!==key || session.erase.expires<Date.now()) throw denied();
+    if(erasing)throw new ApiError(409,'PROFILE_ERASING','The local profile is being erased.');
     delete session.erase;
-    await options.erase();
-    sessions.clear();bootstrap.clear();
+    erasing=true;
+    importJob?.abort();
+    try {
+      await options.erase();
+      sessions.clear();bootstrap.clear();
+    } finally {erasing=false;}
     return res.status(204).send();
   });
   api.get('/api/v1/events',(req,res)=>{

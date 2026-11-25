@@ -231,16 +231,16 @@ export class Store {
     const p=this.candidate(row);
     const [source,id]=[p.namespace,p.id];
     const saved=source==='x'?this.get<{metadata:string}>("SELECT metadata FROM post_display WHERE namespace='x' AND post_id=?",id):undefined;
-    const display=saved?json<{shared?:string;manual?:'user-shared'|'manual-import'}>(saved.metadata):undefined;
+    const display=saved?json<{shared?:string;manual?:'user-shared'|'manual-import';displayName?:string;media?:Post['media']}>(saved.metadata):undefined;
     const preview=display?.shared;
     const stale=source==='x'&&now!==undefined&&row.verified_at!==null&&row.verified_at<now-24*60*60_000;
     const provenance=this.all<{collector:HistoryCollectorId}>('SELECT collector FROM post_sources WHERE namespace=? AND post_id=? ORDER BY observed_at DESC,collector',source,id).map(value=>value.collector);
     return {namespace:source,id,canonicalId:p.canonicalId,text:source==='mock'?p.text:preview??null,
       preview:source==='mock'?'simulation':preview?display?.manual??'user-shared':stale?'stale':p.text?'metadata':'unresolved',
-      authorId:p.authorId,handle:source==='mock'||preview?p.handle:null,displayName:source==='mock'?p.displayName:null,
+      authorId:p.authorId,handle:source==='mock'||preview?p.handle:null,displayName:source==='mock'?p.displayName:display?.displayName??null,
       language:stale?null:p.language,createdAt:stale?null:p.createdAt,kind:stale?'unknown':p.kind,metrics:stale?unknownMetrics:p.metrics,observedAt:p.observedAt,
       simulated:source==='mock',firstSeenAt:row.first_seen_at,originalUrl:canonicalUrl(source,id),
-      collector:provenance[0],...(detail?{provenance}:{}),
+      collector:provenance[0],...(detail?{provenance,media:display?.media}:{}),
       matches:this.matches(source,id).map(match=>detail?match:{...match,signals:[],unavailable:[],penalties:[]}),
       feedback:this.feedback(source,id),preferences:this.preferences(source,p.authorId),
       ...(detail?{snapshots:stale?[]:this.all<{collected_at:number;metrics:string}>('SELECT collected_at,metrics FROM engagement_snapshots WHERE namespace=? AND post_id=? ORDER BY collected_at DESC LIMIT 20',source,id).map(s=>({collectedAt:s.collected_at,metrics:json(s.metrics)}))}:{})};
@@ -279,6 +279,8 @@ export class Store {
       WHERE excluded.last_seen_at>=last_seen_at`,
       p.namespace,p.id,p.canonicalId,p.authorId,p.text||null,p.text?hash(normalize(p.text)):null,p.kind,p.language,p.createdAt,now,p.observedAt,p.namespace==='x'&&p.collector!=='manual'?now:null,p.observation,JSON.stringify(p.metrics));
     this.run('INSERT INTO engagement_snapshots VALUES (?,?,?,?,?)',p.namespace,p.id,p.observation,p.observedAt,JSON.stringify(p.metrics));
+    if(p.media&&p.collector==='session')this.run(`INSERT INTO post_display VALUES (?,?,?)
+      ON CONFLICT(namespace,post_id) DO UPDATE SET metadata=json_patch(post_display.metadata,excluded.metadata)`,p.namespace,p.id,JSON.stringify({media:p.media}));
     this.provenance(p);
     return this.row(p.namespace,p.id)?.observation===p.observation;
   }

@@ -59,9 +59,13 @@ export const feedbackSchema = z.strictObject({rating:z.enum(['useful','irrelevan
 export const preferencesSchema = z.strictObject({muted:z.boolean(),favorite:z.boolean()});
 export type Feedback = z.infer<typeof feedbackSchema>;
 export type Preferences = z.infer<typeof preferencesSchema>;
-export const metricsSchema = z.strictObject({likes:counter.nullable(),reposts:counter.nullable(),replies:counter.nullable(),views:counter.nullable()});
+export const metricsSchema = z.strictObject({likes:counter.nullable(),reposts:counter.nullable(),replies:counter.nullable(),views:counter.nullable(),quotes:counter.nullable().optional()});
 export type Metrics = z.infer<typeof metricsSchema>;
 export const unknownMetrics: Metrics = {likes:null,reposts:null,replies:null,views:null};
+export const postMediaSchema=z.strictObject({
+  kind:z.enum(['photo','video','gif']),url:z.string().max(512).regex(/^https:\/\/pbs\.twimg\.com\//).nullable(),
+  width:counter.nullable(),height:counter.nullable(),alt:z.string().max(1000).nullable(),durationMs:counter.nullable(),
+});
 export const kindSchema = z.enum(['original','reply','repost','quote','unknown']);
 export const namespaceSchema = z.enum(['mock','x']);
 export type Source = z.infer<typeof namespaceSchema>;
@@ -76,6 +80,7 @@ export type Candidate = {
   namespace: Source; id:string; canonicalId:string; text:string; authorId:string|null; handle:string|null;
   displayName:string|null; language:string|null; createdAt:number|null; kind:z.infer<typeof kindSchema>;
   metrics:Metrics; observedAt:number; observation:string;
+  media?:z.infer<typeof postMediaSchema>[]|null;
   collector?:CollectorId|'manual';
 };
 export type Classification = 'silent'|'standard'|'immediate'|'delayed';
@@ -86,12 +91,13 @@ export type Score = {
   classification:Classification; previousScore?:number;
 };
 export type Match = Score & {listId:string;listName:string;revision:number;suppression:string|null};
-export type Post = Omit<Candidate,'observation'|'text'|'collector'> & {
+export type Post = Omit<Candidate,'observation'|'text'|'collector'|'media'> & {
   text:string|null; originalUrl:string|null; firstSeenAt:number; simulated:boolean; matches:Match[];
   feedback:Feedback; preferences:Preferences; snapshots?:{collectedAt:number;metrics:Metrics}[];
   preview?:'simulation'|'user-shared'|'manual-import'|'metadata'|'unresolved'|'stale';
   collector?:HistoryCollectorId;
   provenance?:HistoryCollectorId[];
+  media?:z.infer<typeof postMediaSchema>[];
 };
 export type Alert = {
   id:string; namespace:Source; postId:string|null; listName:string|null; decisionAt:number;
@@ -129,4 +135,5 @@ export type SourceInfo = {
   account?:string|null;
   coverage?:CollectionCoverage;
   manualPosts?:number;
+  pythonWorker?:string;
 };

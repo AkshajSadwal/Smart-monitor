@@ -34,6 +34,8 @@ function profileHandle(target){
   if(handle&&!siteRoutes.has(handle.toLowerCase()))return handle;
 }
 
+const fingerprintOf=value=>createHash('sha256').update('smart-monitor-x-session-v1\0').update(value).digest('hex');
+
 function browserAccount(identityPath,onStatus){
   let current,accountWindow,transientStatus,identity,seenCookie=false,updateTimer,expiryTimer;
   let operations=Promise.resolve();
@@ -123,8 +125,7 @@ function browserAccount(identityPath,onStatus){
       expiryTimer=setTimeout(publishSoon,Math.min(2_147_483_647,Math.max(1,cookie.expirationDate*1000-now)));
       expiryTimer.unref();
     }
-    // Keep the cookie inside Chromium. Only a one-way digest goes into the sealed identity record.
-    const fingerprint=cookie?createHash('sha256').update('smart-monitor-x-session-v1\0').update(cookie.value).digest('hex'):undefined;
+    const fingerprint=cookie?fingerprintOf(cookie.value):undefined;
     if(identity&&(identity.fingerprint!==fingerprint||login||transientStatus==='Session expired'))await clearIdentity();
     if(transientStatus)return result(transientStatus,current.persistent);
     if(challenge)return result('Verification required',current.persistent);
@@ -179,6 +180,7 @@ function browserAccount(identityPath,onStatus){
     });
     return state;
   }
+
   async function disconnect(remembered){
     accountWindow?.destroy();
     const saved=remembered&&!current?.persistent?session.fromPartition(savedPartition):undefined;
@@ -195,8 +197,22 @@ function browserAccount(identityPath,onStatus){
     identity=undefined;
     return result('Disconnected',false);
   }
-  return ({action,remember,remembered})=>serialized(()=>
+  const controller=({action,remember,remembered})=>serialized(() =>
     action==='open'?open(remember,remembered):action==='disconnect'?disconnect(remembered):check(remembered,action==='confirm'));
+  // This method is called only over the private Electron-to-service channel.
+  controller.collectionCredentials=remembered=>serialized(async()=>{
+    const state=await check(remembered);
+    if(state.status!=='Connected')return {status:state.status};
+    const now=Date.now();
+    const read=async name=>(await current.context.cookies.get({url:origin,name,secure:true})).filter(cookie=>
+      /^[!-~]{1,1024}$/.test(cookie.value)&&(cookie.expirationDate===undefined||cookie.expirationDate*1000>now));
+    const [auth,csrf]=await Promise.all([read('auth_token'),read('ct0')]);
+    if(auth.length!==1||csrf.length!==1||fingerprintOf(auth[0].value)!==identity.fingerprint)
+      return {status:'Authentication required'};
+    return {status:'Connected',handle:state.handle,fingerprint:identity.fingerprint,authToken:auth[0].value,
+      csrfToken:csrf[0].value,expiresAt:Math.floor(Math.min(auth[0].expirationDate===undefined?Infinity:auth[0].expirationDate*1000,now+30*86_400_000))};
+  });
+  return controller;
 }
 
 module.exports={browserAccount,xNavigation,allowedResource};

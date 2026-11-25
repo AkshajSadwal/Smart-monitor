@@ -12,6 +12,9 @@ import {Monitor} from './monitor';
 import {OSVault,removeRetiredCredentials} from './credential-store';
 import {WebsiteSession} from './website-session';
 import {desktopBridge} from './desktop-ipc';
+import {TwscrapeWorker} from './twscrape-worker';
+import {twscrapeDriver} from './twscrape-driver';
+
 
 function profileHome() {
   if (process.env.MONITOR_PROFILE) return resolve(process.env.MONITOR_PROFILE);
@@ -72,23 +75,52 @@ async function serve() {
   catch(error){lock.close();throw error;}
   let shutting=false;
   const token=random();
-  const desktop=desktopBridge();
-  const website=new WebsiteSession(store,new OSVault(profile+':website'));
+  const desktop = desktopBridge();
+
+  const remembered = () =>
+    store.value<{ persistent: boolean }>(
+      'session:browser',
+      { persistent: false }
+    ).persistent;
+
+  const file=fileURLToPath(import.meta.url);
+  const checkout=resolve(dirname(file),file.endsWith('.ts')?'../..':'..');
+  const pythonBinary=process.platform==='win32'?'Scripts/python.exe':'bin/python';
+  const localPython=join(checkout,'.local','twscrape-venv',pythonBinary);
+  const bundledPython=join(checkout,'python-runtime',process.platform==='win32'?'python.exe':'bin/python');
+  const python=process.env.MONITOR_PYTHON?resolve(process.env.MONITOR_PYTHON):existsSync(bundledPython)?bundledPython:localPython;
+  const shippedWorker=join(dirname(file),'python');
+  const twscrape=new TwscrapeWorker(python,existsSync(shippedWorker)?shippedWorker:join(checkout,'apps','service','python'));
+  const driver=desktop&&process.env.MONITOR_TWSCRAPE_LIVE==='1'&&existsSync(python)
+    ?twscrapeDriver(twscrape,join(profile,'monitor.sqlite'),signal=>desktop.collectionCredentials(remembered(),signal))
+    :undefined;
+  const website=new WebsiteSession(store,new OSVault(profile+':website'),driver);
+
   // A previously configured driver must not leave an unsupported source running.
-  if(website.state.status==='Unsupported'&&store.sources.some(row=>row.id==='session'&&(row.active||row.configured))){
-    store.db.transaction(()=>{
+  if (
+    website.state.status === 'Unsupported' &&
+    store.sources.some(
+      row => row.id === 'session' && (row.active || row.configured)
+    )
+  ) {
+    store.db.transaction(() => {
       store.deactivate('session');
-      store.run("UPDATE data_sources SET status='Unsupported',error_code=NULL WHERE id='session'");
+
+      store.run(
+        "UPDATE data_sources SET status='Unsupported',error_code=NULL WHERE id='session'"
+      );
     })();
   }
-  const remembered=()=>store.value<{persistent:boolean}>('session:browser',{persistent:false}).persistent;
-  const browserAccount=desktop?(action:Parameters<typeof desktop.account>[0])=>desktop.account(action,remembered()):undefined;
+
+  const browserAccount = desktop
+    ? (action: Parameters<typeof desktop.account>[0]) =>
+        desktop.account(action, remembered())
+    : undefined;
   const monitor:Monitor=new Monitor(store,Date.now,desktop?.notify,(source,id,url)=>{
     if(desktop)desktop.send({type:'activate',source,id,url});
     else if(url) openBrowser(url);
     else void control<{url:string}>('bootstrap','POST',{post:id,source}).then(result=>openBrowser(result.url)).catch(()=>{});
   },website);
-  const file=fileURLToPath(import.meta.url);
   const root=process.env.MONITOR_WEB_ROOT??resolve(dirname(file),file.endsWith('.ts')?'../../apps/web/out':'../apps/web/out');
   const stop=()=>{
     if (shutting) return;
@@ -115,7 +147,8 @@ async function serve() {
     catch(error) {monitor.start();throw error;}
     store.db.pragma('secure_delete = ON');
     store.db.transaction(()=>{
-      for (const table of ['notifications','monitoring_jobs','scores','posts','watchlists','author_preferences','authors','account_relationships','usage_buckets','notification_limits','settings']) store.db.exec('DELETE FROM '+table);
+      for (const table of ['notifications','monitoring_jobs','scores','posts','watchlists','author_preferences','authors','account_relationships','usage_buckets','notification_limits']) store.db.exec('DELETE FROM '+table);
+      store.run("DELETE FROM settings WHERE key NOT LIKE 'twscrape:%'");
       store.run("UPDATE data_sources SET active=0,configured=0,status='Retired',account_id=NULL,vault_ref=NULL,error_code=NULL,last_success_at=NULL,gap=NULL WHERE id='x'");
       store.run("UPDATE data_sources SET active=0,configured=0,status='Unsupported',account_id=NULL,vault_ref=NULL,error_code=NULL,last_success_at=NULL,gap=NULL WHERE id='session'");
       store.run("UPDATE data_sources SET active=1,configured=1,status='Ready',error_code=NULL,last_success_at=NULL,gap=NULL WHERE id='mock'");
@@ -124,7 +157,7 @@ async function serve() {
     store.db.pragma('wal_checkpoint(TRUNCATE)');
     monitor.start();
   };
-  const service=createApi(monitor,{profile,webRoot:root,controlToken:token,stop,erase,browserAccount,website,
+  const service=createApi(monitor,{profile,webRoot:root,controlToken:token,stop,erase,browserAccount,website,twscrape,
     cleanupRetiredCredentials:()=>removeRetiredCredentials(profile,store),
   });
   const fixed=process.env.MONITOR_PORT;

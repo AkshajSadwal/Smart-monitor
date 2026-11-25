@@ -97,7 +97,10 @@ test('local source controls validate sharing and import posts from a JSON file',
   await expect(page.getByRole('heading',{name:'Hosted Monitoring',exact:true})).toHaveCount(0);
   await expect(page.getByRole('heading',{name:'Official X API',exact:true})).toHaveCount(0);
   await expect(page.getByRole('heading',{name:'Simulated',exact:true})).toBeVisible();
-  await expect(page.getByText('Automatic search requires an authorized X collection interface.',{exact:false})).toBeVisible();
+  await expect(page.getByText('Automatic X collection requires X authorization.',{exact:false})).toBeVisible();
+  await expect(page.getByText('Python worker',{exact:true})).toBeVisible();
+  await expect(page.getByText('Unsupported',{exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Enable collection'})).toHaveCount(0);
   await expect(page.getByText('Available in the desktop app')).toBeVisible();
   await page.getByRole('button',{name:'Share selected X post'}).click();
   const sharing=page.getByRole('dialog',{name:'Share a selected X post'});
@@ -120,7 +123,7 @@ test('local source controls validate sharing and import posts from a JSON file',
   const download=page.waitForEvent('download');
   await imports.getByRole('link',{name:'Download JSON example'}).click();
   expect((await download).suggestedFilename()).toBe('smart-monitor-posts.example.json');
-  await imports.getByLabel('Post JSON file').setInputFiles({
+  await imports.getByLabel('Post file').setInputFiles({
     name:'posts.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify([
       {url:'https://x.com/example/status/43',text:'SQLite release candidate from a JSON file',language:'en',metrics:{likes:200}},
     ])),

@@ -4,6 +4,7 @@ import {createApi} from '../apps/service/api';
 import {type Vault} from '../apps/service/credential-store';
 import {Monitor} from '../apps/service/monitor';
 import {Store} from '../apps/service/storage';
+import {twscrapeDriver} from '../apps/service/twscrape-driver';
 import {WebsiteSession,type AuthorizedWebsiteDriver} from '../apps/service/website-session';
 import {unknownMetrics,watchlist,type BrowserAccount,type Candidate,type SourceInfo} from '../packages/contracts/index';
 
@@ -17,6 +18,52 @@ function credentials(){
   const vault:Vault={get:async k=>values.get(k)??null,set:async(k,v)=>{values.set(k,v);},remove:async k=>{values.delete(k);}};
   return {vault,values};
 }
+
+test('twscrape binds the confirmed account, ingests search, and schedules following and engagement independently',async()=>{
+  const store=new Store(':memory:'),{vault,values}=credentials();
+  let now=initial,fingerprint='a'.repeat(64);
+  const operations:string[]=[];
+  const driver=twscrapeDriver({async live(operation,_db,account,options){
+    operations.push(operation);
+    assert.equal(account.handle,'fixture');
+    switch(operation){
+      case 'profile':return {status:200,id:'56',handle:'fixture'};
+      case 'search':
+        assert.equal((options as {query:string}).query,'sqlite OR "release candidate"');
+        return {status:200,items:[{...candidate,namespace:'x',media:null}]};
+      case 'following':
+        assert.equal((options as {accountId:string}).accountId,'56');
+        return {status:200,following:['42']};
+      case 'lookup':return {status:200,items:[{...candidate,namespace:'x',metrics:{...candidate.metrics,likes:81},media:null}]};
+      default:throw new Error(operation);
+    }
+  }},'fixture',async()=>({status:'Connected',handle:'fixture',expiresAt:initial+86_400_000,fingerprint,authToken:'fixture-token',csrfToken:'fixture-csrf'}));
+  const connection=new WebsiteSession(store,vault,driver,()=>now);
+  const monitor=new Monitor(store,()=>now,async()=>'submitted',undefined,connection);
+  store.saveList(watchlist.parse({name:'SQLite',terms:[{kind:'word',text:'SQLite',direction:'include'},
+    {kind:'phrase',text:'release candidate',direction:'include'}]}),now);
+  try{
+    await connection.connect(signal);
+    assert.doesNotMatch(values.get('website-grant')??'',/fixture-token|fixture-csrf/);
+    store.run('UPDATE data_sources SET active=0 WHERE active=1');
+    store.run("UPDATE data_sources SET active=1 WHERE id='session'");
+    monitor.pause(false);
+    await monitor.tick();
+    assert.deepEqual(operations,['profile','search','following']);
+    assert.equal(store.count("SELECT count(*) n FROM account_relationships WHERE account_id='56' AND author_id='42'"),1);
+    assert.equal(store.matches('x',candidate.id).length,1);
+    await connection.refreshSignals(now+1,signal);
+    assert.equal(await connection.collect(store.lists,now+119_999,signal,()=>assert.fail()),false);
+    assert.equal(operations.length,3);
+    now+=15*60_000;
+    assert.equal((await connection.lookup!([candidate],now,signal)).posts[0].metrics.likes,81);
+    assert.equal((await connection.lookup!([candidate],now+1,signal)).posts.length,0);
+    fingerprint='b'.repeat(64);
+    assert.equal(await connection.collect(store.lists,now,signal,()=>assert.fail()),false);
+    assert.equal(connection.state.status,'Session expired');
+    assert.deepEqual(operations,['profile','search','following','lookup']);
+  }finally{await monitor.stop();store.close();}
+});
 
 test('an authorized session fixture persists the cursor and dispatches through the actual monitor',async()=>{
   const store=new Store(':memory:'),{vault,values}=credentials();
@@ -148,6 +195,9 @@ test('desktop sign-in returns metadata only and leaves session collection unsupp
     assert.deepEqual((await send({action:'confirm'})).json(),{status:'Connected',persistent:true,handle:'fixture_user'});
     const sources=(await api.inject({url:'/api/v1/sources',headers})).json<SourceInfo[]>();
     assert.equal(sources.find(source=>source.id==='session')?.status,'Unsupported');
+    const collection=await api.inject({method:'POST',url:'/api/v1/sources/session/connect',headers});
+    assert.equal(collection.statusCode,403);
+    assert.equal(collection.json().error.code,'WEBSITE_PERMISSION_REQUIRED');
     assert.equal(sources.find(source=>source.id==='session')?.account,'fixture_user');
     assert.deepEqual(store.value('session:browser',null),{persistent:true});
     store.run("UPDATE data_sources SET configured=1 WHERE id='session'");

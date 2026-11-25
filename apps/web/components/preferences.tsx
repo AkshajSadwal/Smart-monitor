@@ -21,13 +21,15 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
         <dl className="fields">
           <div><dt>Browser sign-in</dt><dd>{local.browser?.available?(local.browser.status==='Connected'?'Confirmed by you':local.browser.status):'Available in the desktop app'}</dd></div>
           <div><dt>Username</dt><dd>{local.account?'@'+local.account:'Awaiting confirmation'}</dd></div>
+          <div><dt>Python worker</dt><dd>{local.pythonWorker??'Unavailable'}</dd></div>
           <div><dt>Session collection</dt><dd>{local.status}</dd></div>
-          <div><dt>Monitoring state</dt><dd>{local.status==='Unsupported'?'Unavailable':!local.active?'Not selected':monitor.paused?'Paused':monitor.status}</dd></div>
+          <div><dt>Monitoring state</dt><dd>{local.status==='Unsupported'?(local.browser?.available?'X authorization required':'Desktop app required'):!local.active?'Not selected':monitor.paused?'Paused':monitor.status}</dd></div>
           <div><dt>Collection capabilities</dt><dd>{local.capabilities.length?local.capabilities.join(', '):'None available'}</dd></div>
           <SourceStats source={local}/>
           <div><dt>Manually saved posts</dt><dd>{local.manualPosts??0}</dd></div>
         </dl>
-        {local.status==='Unsupported'&&<p className="warning">Automatic search requires an authorized X collection interface. Browser sign-in alone does not grant collection access. No automatic X posts or alerts will be collected.</p>}
+        {local.status==='Unsupported'&&<p className="warning">Automatic X collection requires X authorization. The Python worker can process local exports.</p>}
+        {local.status==='Rate limited'&&<p className="warning">Collection is rate limited. See the next scheduled check.</p>}
         {local.error&&<p className="warning">Collection error: {local.error}</p>}
         {local.browser?.available&&local.browser.status==='Check required'&&<p className="subtle">Checking the saved local session…</p>}
         {local.browser?.status==='Profile confirmation required'&&<p>In the X window, choose <strong>Profile</strong>. Confirm below when your profile shows <strong>Edit profile</strong>.</p>}
@@ -48,10 +50,50 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
           </div>
         </>}
         <div className="actions">
-          {local.configured&&<button className="button" disabled={busy||local.active} onClick={()=>select(local)}>{local.active?'Selected':'Use Local X Account'}</button>}
-          <button className="button" disabled={busy} onClick={()=>setShare(true)}>Share selected X post</button>
-          <button className="button" disabled={busy} onClick={()=>setImportOpen(true)}>Import posts</button>
-          {!!local.manualPosts&&<Link className="button" href="/feed/?collector=manual">View manual posts</Link>}
+          {local.browser?.status === 'Connected' &&
+            local.status !== 'Unsupported' && (
+              <button
+                className="button primary"
+                disabled={busy}
+                onClick={() =>
+                  void run(
+                    () => request(
+                      '/sources/session/connect',
+                      'POST'
+                    ),
+                    'Local collection session configured.'
+                  )
+                }
+              >
+                {local.configured
+                  ? 'Reconnect collection'
+                  : 'Enable collection'}
+              </button>
+            )}
+
+          {local.configured && (
+            <button
+              className="button"
+              disabled={busy || local.active}
+              onClick={() => select(local)}
+            >
+              {local.active ? 'Selected' : 'Use Local X Account'}
+            </button>
+          )}
+
+          <button className="button" disabled={busy} onClick={() => setShare(true)}>
+            Share selected X post
+          </button>
+
+          <button className="button" disabled={busy} onClick={() => setImportOpen(true)}>
+            Import posts
+          </button>
+
+          {!!local.manualPosts && (
+            <Link className="button" href="/feed/?collector=manual">
+              View manual posts
+            </Link>
+          )}
         </div>
       </section>}
       {simulated&&<section className="panel form-stack">
@@ -120,16 +162,21 @@ function ImportPosts({busy,close,run}:{busy:boolean;close:()=>void;run:Run}) {
   const [file,setFile]=useState<File|null>(null),[consent,setConsent]=useState(false);
   const [result,setResult]=useState<{saved:number;skipped:number}|null>(null);
   return <Modal title="Import X posts" close={close}>
-    <p>Choose a JSON file with up to 50 posts and a maximum size of 60 KB. Imported posts are matched locally and never trigger alerts.</p>
+    <p>Choose a Smart Monitor JSON file or a twscrape JSONL export with up to 50 posts and a maximum size of 60 KB. Imports are matched locally and never trigger alerts.</p>
     <p><a href={`data:application/json;charset=utf-8,${examplePosts}`} download="smart-monitor-posts.example.json">Download JSON example</a></p>
     <form className="form-stack" onSubmit={event=>{event.preventDefault();void run(async()=>{
-      if(!file||file.size>60*1024)throw new Error('Choose a JSON file under 60 KB.');
-      let posts:unknown;
-      try {posts=JSON.parse(await file.text());}
-      catch {throw new Error('The selected file must contain a valid JSON array.');}
-      setResult(await request('/posts/import','POST',{posts,consent}));
+      if(!file||file.size>60*1024)throw new Error('Choose a JSON or JSONL file up to 60 KB.');
+      const text=await file.text();
+      if(file.name.toLowerCase().endsWith('.jsonl')){
+        setResult(await request('/posts/import','POST',{twscrape:text,consent}));
+      }else{
+        let posts:unknown;
+        try {posts=JSON.parse(text);}
+        catch {throw new Error('The selected JSON file must contain a valid array.');}
+        setResult(await request('/posts/import','POST',{posts,consent}));
+      }
     });}}>
-      <label>Post JSON file<input type="file" accept=".json,application/json" required onChange={event=>{
+      <label>Post file<input type="file" accept=".json,.jsonl,application/json,application/x-ndjson" required onChange={event=>{
         setFile(event.target.files?.[0]??null);
         setResult(null);
       }}/></label>
@@ -142,8 +189,9 @@ function ImportPosts({busy,close,run}:{busy:boolean;close:()=>void;run:Run}) {
 }
 
 type Preference = {namespace:Source;id:string;handle:string|null;muted:boolean;favorite:boolean};
-export function SettingsPage({settings,run,busy}:{settings:ProfileSettings;run:Run;busy:boolean}) {
-  const [draft,setDraft]=useState(settings),[important,setImportant]=useState(settings.importantTerms.join(', '));
+export function SettingsPage({settings,run,busy,localX}:{settings:ProfileSettings;run:Run;busy:boolean;localX:boolean}) {
+  const minimum=localX?120:60;
+  const [draft,setDraft]=useState({...settings,intervalSeconds:Math.max(minimum,settings.intervalSeconds)}),[important,setImportant]=useState(settings.importantTerms.join(', '));
   const [authors,setAuthors]=useState<Preference[]>([]),[feedback,setFeedback]=useState(''),[confirmation,setConfirmation]=useState('');
   const [notificationTest,setNotificationTest]=useState('');
   const [erase,setErase]=useState<{nonce:string;profile:string;posts:number;lists:number}|null>(null),[erased,setErased]=useState(false);
@@ -161,7 +209,7 @@ export function SettingsPage({settings,run,busy}:{settings:ProfileSettings;run:R
   return <div className="stack">
     <form className="stack" onSubmit={save}>
       <section className="panel form-stack"><h2>Monitoring and alerts</h2><div className="form-grid">
-        <label>Polling interval (seconds)<input type="number" min={60} max={3600} value={draft.intervalSeconds} onChange={e=>set('intervalSeconds',+e.target.value)}/></label>
+        <label>Polling interval (seconds)<input type="number" min={minimum} max={3600} value={draft.intervalSeconds} onChange={e=>set('intervalSeconds',+e.target.value)}/></label>
         <label>Daily notification cap<input type="number" min={0} max={1000} value={draft.dailyCap} onChange={e=>set('dailyCap',+e.target.value)}/></label>
         <label className="check"><input type="checkbox" checked={draft.nativeNotifications} onChange={e=>set('nativeNotifications',e.target.checked)}/> Desktop notifications</label>
         <label className="check"><input type="checkbox" checked={draft.simulatedNotifications} onChange={e=>set('simulatedNotifications',e.target.checked)}/> Allow desktop notifications for simulated posts</label>

@@ -1,5 +1,5 @@
 import {z} from 'zod';
-import {kindSchema,metricsSchema,namespaceSchema,type Candidate,type CollectorId,type Watchlist} from '../contracts/index';
+import {kindSchema,metricsSchema,namespaceSchema,postMediaSchema,type Candidate,type CollectorId,type Watchlist} from '../contracts/index';
 
 const id=z.string().regex(/^[\w-]{1,100}$/);
 const xPostId=z.string().regex(/^\d{1,25}$/);
@@ -8,6 +8,7 @@ export const collectedPost=z.strictObject({
   authorId:z.string().max(100).nullable(),handle:z.string().max(30).nullable(),
   displayName:z.string().max(200).nullable(),language:z.string().max(35).nullable(),createdAt:z.number().int().nonnegative().nullable(),
   kind:kindSchema,metrics:metricsSchema,observedAt:z.number().int().nonnegative(),observation:z.string().max(200),
+  media:z.array(postMediaSchema).max(10).nullable().optional(),
 }).refine(post=>post.namespace==='mock'||[post.id,post.canonicalId].every(id=>xPostId.safeParse(id).success));
 
 export type CommitPage = (posts:Candidate[],historical:boolean,key:string,state:unknown)=>void;
@@ -16,6 +17,7 @@ export interface Collector {
   readonly capabilities:readonly string[];
   // Earliest safe upstream access; Infinity means authorization is unavailable.
   readonly nextAllowedAt?:number;
+  readonly nextLookupAt?:number;
   readonly availabilityStatus?:string;
   collect(lists:Watchlist[],now:number,signal:AbortSignal,commit:CommitPage):Promise<boolean>;
   lookup?(posts:Candidate[],now:number,signal:AbortSignal,attempts?:Map<string,number>):Promise<{posts:Candidate[];removed:string[]}>;

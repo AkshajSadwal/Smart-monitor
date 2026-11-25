@@ -70,7 +70,7 @@ try {
   });
   await routeAccount(instance);
   await reopened.getByRole('link',{name:'Data sources',exact:true}).click();
-  await expect(reopened.getByText('Automatic search requires an authorized X collection interface.',{exact:false})).toBeVisible();
+  await expect(reopened.getByText('Automatic X collection requires X authorization.',{exact:false})).toBeVisible();
   if(windows)await reopened.getByRole('checkbox',{name:/Remember my sign-in/}).check();
   const accountOpened=instance.waitForEvent('window',{timeout:12_000});
   await reopened.getByRole('button',{name:'Open X sign-in'}).click();

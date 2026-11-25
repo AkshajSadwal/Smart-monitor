@@ -22,13 +22,15 @@ metadata.name='smart-monitor';
 metadata.build.electronVersion=electron;
 metadata.build.npmRebuild=false;
 metadata.build.directories.output=resolve(root,process.env.MONITOR_DESKTOP_RELEASE??'release');
-metadata.build.files=['main.cjs','account.cjs','tray.png','package.json','!node_modules{,/**/*}'];
+const desktopFiles=metadata.build.files.filter(file=>typeof file==='string');
+metadata.build.files=[...desktopFiles,'!node_modules{,/**/*}'];
 metadata.build.extraResources=[{from:'web',to:'web'},{from:'worker',to:'service'},{from:'node_modules',to:'service/node_modules'},{from:'runtime',to:'runtime'}];
 metadata.build.win.icon='app.ico';
 const rootManifest=JSON.parse(readFileSync(join(root,'package.json'),'utf8'));
 metadata.allowScripts=rootManifest.allowScripts;
 writeFileSync(join(stage,'package.json'),JSON.stringify(metadata,null,2));
-for(const file of ['main.cjs','account.cjs','tray.png','installer.nsh'])copyFileSync(join(root,'apps','desktop',file),join(stage,file));
+for(const file of [...desktopFiles.filter(file=>file!=='package.json'),'installer.nsh'])
+  copyFileSync(join(root,'apps','desktop',file),join(stage,file));
 const icon=readFileSync(join(stage,'tray.png'));
 const icoHeader=Buffer.alloc(22);
 icoHeader.writeUInt16LE(1,2);
@@ -40,6 +42,9 @@ icoHeader.writeUInt32LE(icoHeader.length,18);
 writeFileSync(join(stage,'app.ico'),Buffer.concat([icoHeader,icon]));
 mkdirSync(join(stage,'worker'));
 copyFileSync(join(root,'dist','monitor.mjs'),join(stage,'worker','monitor.mjs'));
+mkdirSync(join(stage,'worker','python'));
+for(const file of ['twscrape_worker.py','requirements.txt'])
+  copyFileSync(join(root,'apps','service','python',file),join(stage,'worker','python',file));
 cpSync(join(root,'apps','web','out'),join(stage,'web'),{recursive:true});
 
 const env={

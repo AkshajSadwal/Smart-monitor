@@ -39,8 +39,5 @@ export function selectedPost(input:unknown,now:number) {
 
 export function importedPosts(input:unknown,now:number) {
   const {posts}=importSchema.parse(input);
-  const normalized=posts.map(post=>normalizePost(post,now));
-  if(new Set(normalized.map(post=>post.id)).size!==normalized.length)
-    throw new ApiError(400,'DUPLICATE_IMPORT','Include each post at most once per import. Import a later observation in a separate file.');
-  return normalized;
+  return posts.map(post=>normalizePost(post,now));
 }
