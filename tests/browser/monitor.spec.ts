@@ -94,8 +94,9 @@ test('source controls enforce hosted consent and preserve the selected source af
   await expect(page.getByRole('heading',{name:'SQLite releases'})).toBeVisible();
   await page.getByRole('link',{name:'Data sources',exact:true}).click();
   await expect(page.getByRole('heading',{name:'Local X Account',exact:true})).toBeVisible();
-  await expect(page.getByRole('heading',{name:'Official X API',exact:true})).toBeVisible();
-  await page.getByRole('button',{name:'Configure hosted service'}).click();
+  await expect(page.getByRole('heading',{name:'Hosted Monitoring',exact:true})).toBeVisible();
+  await expect(page.getByRole('heading',{name:'Official X API',exact:true})).toHaveCount(0);
+  await page.getByRole('button',{name:'Configure server'}).click();
   const modal=page.getByRole('dialog',{name:'Configure Hosted Monitoring'});
   await modal.getByLabel('Public HTTPS server URL').fill('https://127.0.0.1');
   await modal.getByRole('checkbox',{name:'sqlite',exact:true}).check();
@@ -104,9 +105,9 @@ test('source controls enforce hosted consent and preserve the selected source af
   await modal.getByRole('button',{name:'Approve hosted configuration'}).click();
   await expect(modal.getByRole('alert')).toContainText('public HTTPS hostname');
   await modal.getByRole('button',{name:'Close dialog'}).click();
-  await expect(page.getByText('Simulated · Paused')).toBeVisible();
-  await expect(page.getByText('Authenticated website-session collection')).toBeVisible();
-  await expect(page.getByRole('button',{name:'Connect official OAuth'})).toBeVisible();
+  await expect(page.getByRole('heading',{name:'Simulated',exact:true})).toBeVisible();
+  await expect(page.getByText('Automatic search requires an authorized X collection interface.',{exact:false})).toBeVisible();
+  await expect(page.getByText('Available in the desktop app')).toBeVisible();
   await page.getByRole('button',{name:'Share selected X post'}).click();
   const sharing=page.getByRole('dialog',{name:'Share a selected X post'});
   await sharing.getByLabel('X post permalink').fill('https://example.invalid/m/status/42');

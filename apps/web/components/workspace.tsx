@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import {Activity,ArrowRight,Bell,Bookmark,ChevronRight,CircleAlert,Database,ExternalLink,LayoutGrid,ListFilter,Menu,Pause,Play,Plus,Radar,Settings2,Signal,Target,X,Zap} from 'lucide-react';
 import {useCallback,useEffect,useRef,useState,type ReactNode} from 'react';
-import {collectorLabel,type Alert,type CollectorId,type Overview,type Post,type Settings,type Source,type SourceInfo,type Watchlist} from '../../../packages/contracts/index';
+import {collectorLabel,type Alert,type CollectorId,type HistoryCollectorId,type Overview,type Post,type Settings,type Source,type SourceInfo,type Watchlist} from '../../../packages/contracts/index';
 import {authenticate,label,request,timestamp} from './client';
 import {Mascot} from './mascot/mascot';
 import {Watchlists} from './watchlists';
@@ -23,7 +23,7 @@ const title={
   watchlists:['Watchlists','Choose what to track and when a match deserves an alert.'],
   feed:['Post feed','Search matches and see how each post earned its score.'],
   notifications:['Notifications','Review the matches that crossed your alert rules.'],
-  sources:['Data sources','Manage collection access, usage, and connection health.'],
+  sources:['Data sources','Manage account sign-in and collection connections.'],
   settings:['Settings','Set monitoring, attention, and local data preferences.'],
 };
 export type ProfileSettings=Settings & {revision:number};
@@ -133,7 +133,7 @@ function Dashboard({base,updates,open,celebrate}:{base:Base;updates:number;open:
           {failure&&<div className="banner error">{failure}</div>}
           {posts.length?<div className="post-list">{posts.map(post=><PostRow key={post.id} post={post} open={open}/>)}</div>:
             <div className="empty inset"><span className="empty-icon"><ListFilter size={26}/></span><h3>{base.lists.length?'Waiting for matching posts':'Create your first watchlist'}</h3>
-              <p>{base.lists.length?'New matches appear here after collection.':'Try with simulated posts, or connect an official X data source.'}</p>
+              <p>{base.lists.length?'New matches appear here after collection.':'Create a watchlist or try the simulated examples.'}</p>
               <Link className="button" href="/watchlists/">{base.lists.length?'Manage watchlists':<><Plus size={16}/> Create watchlist</>}</Link>
               {!base.lists.length&&<Link className="text-link" href="/sources/">Choose data source <ArrowRight size={15}/></Link>}
             </div>}
@@ -161,7 +161,7 @@ function PostRow({post,open}:{post:Post;open:Open}) {
     <div className="avatar" aria-hidden="true">{author.split(/\s+/).slice(0,2).map(v=>v[0]).join('')}</div>
     <button className="post-body" onClick={()=>open(post)}>
       <span className="post-meta"><strong>{author}</strong>{post.handle&&<span>@{post.handle}</span>}<span>{timestamp(post.createdAt??post.observedAt)}</span>{post.simulated&&<span className="chip mini">Simulated</span>}{post.preview==='user-shared'&&<span className="chip mini">User-shared excerpt</span>}</span>
-      <span className="post-copy">{post.text??(post.preview==='unresolved'?`Unresolved X post · ID ${post.id}`:post.preview==='stale'?'X metadata needs a fresh lookup':'Preview opens on X')}</span>
+      <span className="post-copy">{post.text??(post.preview==='unresolved'?`Unresolved X post · ID ${post.id}`:post.preview==='stale'?'Cached X metadata expired':'Preview opens on X')}</span>
       {post.collector&&post.collector!=='mock'&&<span className="subtle">{collectorLabel[post.collector]}</span>}
       <span className="post-reason">{match ? <><Target size={14}/> {match.listName}{post.matches.length>1?' +' + (post.matches.length-1):''} · {match.matched.join(', ')}</>:post.preview==='unresolved'||post.preview==='user-shared'?'Awaiting authorized content for matching':'No active match'}</span>
     </button>
@@ -169,9 +169,14 @@ function PostRow({post,open}:{post:Post;open:Open}) {
   </article>;
 }
 const blankFilters={q:'',listId:'',priority:'',kind:'',sort:'recent'};
+function HistorySourceFilter({value,change}:{value:HistoryCollectorId|'';change:(value:HistoryCollectorId|'')=>void}) {
+  return <label>Source<select value={value} onChange={event=>change(event.target.value as HistoryCollectorId|'')}>
+    <option value="">Active source</option>{Object.entries(collectorLabel).map(([id,label])=><option key={id} value={id}>{label}</option>)}
+  </select></label>;
+}
 function Feed({source,lists,updates,open}:{source:CollectorId;lists:Watchlist[];updates:number;open:Open}) {
   const [filters,setFilters]=useState(blankFilters),[items,setItems]=useState<Post[]>([]),[cursor,setCursor]=useState<string|null>(null);
-  const [sourceFilter,setSourceFilter]=useState<CollectorId|''>('');
+  const [sourceFilter,setSourceFilter]=useState<HistoryCollectorId|''>('');
   const [pending,setPending]=useState<PageData<Post>|null>(null),[error,setError]=useState(''),[generation,setGeneration]=useState(0);
   const selected=sourceFilter||source;
   const query=new URLSearchParams({collector:selected,...Object.fromEntries(Object.entries(filters).filter(([,v])=>v))}).toString();
@@ -206,7 +211,7 @@ function Feed({source,lists,updates,open}:{source:CollectorId;lists:Watchlist[];
   return <section className="panel">
     <div className="toolbar">
       <label className="grow">Search<input value={filters.q} onChange={e=>setFilters({...filters,q:e.target.value})} maxLength={200} placeholder={selected==='mock'?'Post text or author':'X post ID'}/></label>
-      <label>Source<select value={sourceFilter} onChange={event=>setSourceFilter(event.target.value as CollectorId|'')}><option value="">Active source</option>{Object.entries(collectorLabel).map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></label>
+      <HistorySourceFilter value={sourceFilter} change={setSourceFilter}/>
       <label>Watchlist<select value={filters.listId} onChange={e=>setFilters({...filters,listId:e.target.value})}><option value="">All watchlists</option>{lists.map(l=><option value={l.id} key={l.id}>{l.name}</option>)}</select></label>
       <label>Priority<select value={filters.priority} onChange={e=>setFilters({...filters,priority:e.target.value})}><option value="">All priorities</option>{['immediate','standard','delayed','silent'].map(s=><option key={s} value={s}>{label(s)}</option>)}</select></label>
       <label>Post kind<select value={filters.kind} onChange={e=>setFilters({...filters,kind:e.target.value})}><option value="">All kinds</option>{['original','reply','repost','quote','unknown'].map(s=><option key={s} value={s}>{s}</option>)}</select></label>
@@ -219,6 +224,8 @@ function Feed({source,lists,updates,open}:{source:CollectorId;lists:Watchlist[];
   </section>;
 }
 function Notifications({source,updates,run,open,busy}:{source:CollectorId;updates:number;run:Run;open:Open;busy:boolean}) {
+  const [sourceFilter,setSourceFilter]=useState<HistoryCollectorId|''>('');
+  const selected=sourceFilter||source;
   const [unread,setUnread]=useState(false),[alerts,setAlerts]=useState<Alert[]>([]),[error,setError]=useState('');
   const [limit,setLimit]=useState(50);
   const [older,setOlder]=useState<{before:number;beforeId:string}|null>(null);
@@ -229,7 +236,7 @@ function Notifications({source,updates,run,open,busy}:{source:CollectorId;update
       const loaded:Alert[]=[];
       let page:AlertPage|undefined;
       while(active && loaded.length<limit) {
-        const query=new URLSearchParams({collector:source,unread:String(unread),limit:String(Math.min(100,limit-loaded.length))});
+        const query=new URLSearchParams({collector:selected,unread:String(unread),limit:String(Math.min(100,limit-loaded.length))});
         if(page?.cursor) {
           query.set('before',String(page.cursor.before));
           query.set('beforeId',page.cursor.beforeId);
@@ -242,15 +249,12 @@ function Notifications({source,updates,run,open,busy}:{source:CollectorId;update
     }
     void load().catch(e=>{if(active)setError(e.message);});
     return ()=>{active=false;};
-  },[source,updates,unread,limit]);
+  },[selected,updates,unread,limit]);
   const mark=(alert:Alert,read:boolean)=>request(`/notifications/${alert.id}/read`,'PUT',{read});
   return <section className="panel">
     <div className="toolbar"><div className="segmented"><button aria-pressed={!unread} onClick={()=>setUnread(false)}>All</button><button aria-pressed={unread} onClick={()=>setUnread(true)}>Unread</button></div>
-      <div className="actions"><button className="button" disabled={busy} onClick={()=>void run(async()=>{
-        const result=await request<{result:string}>('/notifications/test','POST');
-        if(result.result!=='submitted')throw new Error('The native notification service did not accept the test.');
-      },'Test submitted to the desktop.')}>Test desktop alert</button>
-      <button className="button" disabled={busy||!alerts.some(a=>a.readAt===null)} onClick={()=>void run(()=>request('/notifications/read-all','POST',{collector:source,cutoff:Math.max(...alerts.map(a=>a.decisionAt))}))}>Mark all read</button></div>
+      <HistorySourceFilter value={sourceFilter} change={value=>{setSourceFilter(value);setLimit(50);}}/>
+      <button className="button" disabled={busy||!alerts.some(a=>a.readAt===null)} onClick={()=>void run(()=>request('/notifications/read-all','POST',{collector:selected,cutoff:Math.max(...alerts.map(a=>a.decisionAt))}))}>Mark all read</button>
     </div>
     {error&&<div className="banner error">{error}</div>}
     {alerts.length?alerts.map(a=><article className="alert-row" key={a.id}><span className={`alert-icon ${a.readAt===null?'unread':''}`}><Bell size={18}/></span>
@@ -292,7 +296,6 @@ function PostDetail({selection,embeds,onClose,run}:{selection:{source:Source;id:
       {post.preview==='user-shared'&&<p className="subtle">User-shared excerpt</p>}
       <p>{post.text??'Open the original on X to read this post.'}</p>
       {(post.preview==='unresolved'||post.preview==='user-shared')&&!post.matches.length&&<p className="subtle">The monitor is awaiting authorized post content before evaluating watchlist rules.</p>}
-      {post.hydration&&<p className="warning">{post.hydration}</p>}
       {post.preview==='stale'&&<p className="subtle">Cached X metadata has expired. Open the original for the current post.</p>}
       <p className="subtle">Created {timestamp(post.createdAt)} · Collected {timestamp(post.observedAt)} · {post.kind}</p>
       {!!post.provenance?.length&&<p className="subtle">Sources · {post.provenance.map(id=>collectorLabel[id]).join(', ')}</p>}

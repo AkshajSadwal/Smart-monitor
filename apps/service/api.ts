@@ -3,33 +3,13 @@ import staticFiles from '@fastify/static';
 import { existsSync } from 'node:fs';
 import { randomBytes,timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { collectorSchema,defaults,feedbackSchema,kindSchema,namespaceSchema,normalize,preferencesSchema,settingsSchema,unknownMetrics,watchlist,type Candidate,type Settings,type SourceCapability,type SourceInfo } from '../../packages/contracts/index';
-import {topicSchema} from '../../packages/collection-core/hosted';
-import {queryGroups} from '../../packages/collection-core/x-protocol';
+import { collectorSchema,feedbackSchema,historyCollectorSchema,kindSchema,namespaceSchema,preferencesSchema,settingsSchema,unknownMetrics,watchlist,type BrowserAccount,type Candidate,type SourceInfo } from '../../packages/contracts/index';
+import {publicTopics} from '../../packages/collection-core/hosted';
 import { localTime,scorePost } from './rank';
 import { hash,postSelect,type PostRow } from './storage';
 import type { Monitor } from './monitor';
-import type {XApi} from './x-api';
 import type {HostedClient} from './hosted-client';
 import {selectedPost,type WebsiteSession} from './website-session';
-
-function capabilities(id:SourceInfo['id'],access:SourceCapability['state'],lookup:SourceCapability['state'],stream:boolean,website:string,delivery?:string):SourceCapability[] {
-  if(id==='mock')return [{label:'Simulated search and engagement',state:'Available'},{label:'Simulated full previews',state:'Available'}];
-  if(id==='hosted')return [
-    {label:'Shared public-topic delivery',state:['simulated','ids','metadata','approved-public'].includes(delivery??'')?'Available':access},
-    {label:'VM authenticated website session',state:'Unsupported'},
-    {label:'Live redistribution',state:['ids','metadata','approved-public'].includes(delivery??'')?'Limited':'Permission required',
-      detail:delivery==='approved-public'?'Operator-authorized topic delivery with local post links.':delivery==='metadata'?'Allowed counters and timestamps. Local text lookup is optional.':delivery==='ids'?'Post IDs and links only.':'Depends on the operator’s X authorization.'},
-  ];
-  return [
-    {label:id==='session'?'Official OAuth recent search':'App-only recent search',state:access,detail:'X credentials, endpoint entitlement and a configured budget are required.'},
-    {label:'Engagement lookup',state:lookup,detail:'Availability depends on the endpoint entitlement and returned fields.'},
-    {label:'Filtered Stream',state:id==='x'?(stream?'Available':'Unverified'):'Unsupported',detail:id==='x'?'Requires stream entitlement and developer-app rules.':undefined},
-    {label:'Live post previews',state:'Limited',detail:'Collection supports local matching and ranking. Use the original X link to read the post.'},
-    ...(id==='session'?[{label:'Authenticated website-session collection',state:'Permission required' as const,detail:website},
-      {label:'User-selected post sharing',state:'Available' as const,detail:'Save a permalink and selected excerpt locally.'}]:[]),
-  ];
-}
 
 const nonce=()=>randomBytes(32).toString('base64url');
 const sessionLife=2*60*60_000;
@@ -45,16 +25,10 @@ const idParam=z.strictObject({id:z.uuid()});
 
 export function createApi(monitor:Monitor,options:{
   webRoot?:string;profile:string;controlToken:string;stop:()=>void;
-  credential?:(value:string|null)=>Promise<void>;
-  disconnect?:()=>Promise<void>;
-  clearSignals?:()=>Promise<void>;
-  authorize?:(input:unknown,origin:string)=>Promise<{url:string}>;
-  callback?:(url:string,origin:string)=>Promise<void>;
-  check?:()=>Promise<unknown>;
-  official?:XApi;
-  localAccount?:XApi;
+  browserAccount?:(action:import('./desktop-ipc').BrowserAction)=>Promise<BrowserAccount>;
   website?:WebsiteSession;
   hosted?:HostedClient;
+  cleanupRetiredCredentials?:()=>Promise<void>;
   erase:()=>Promise<void>;
 }) {
   const {store}=monitor;
@@ -93,7 +67,7 @@ export function createApi(monitor:Monitor,options:{
       return;
     }
     if (writes && originHeader!==origin) throw denied();
-    if (path==='/api/v1/health' || (path==='/api/v1/session' && req.method==='POST') || ['/api/v1/oauth/callback','/api/v1/oauth/session/callback'].includes(path)) return;
+    if (path==='/api/v1/health' || (path==='/api/v1/session' && req.method==='POST')) return;
     const cookie=req.headers.cookie?.split(/;\s*/).find(entry=>entry.startsWith(cookieName+'='))?.slice(cookieName.length+1);
     const session=cookie?sessions.get(cookie):undefined;
     if (!session || session.expires<Date.now()) {
@@ -130,11 +104,11 @@ export function createApi(monitor:Monitor,options:{
     const path=post?`/feed/?post=${encodeURIComponent(post)}&source=${source??'mock'}`:'/';
     return {url:`${origin}${path}#open=${fragment}`};
   });
-  api.post('/api/control/credentials',async req=>{
-    const {value}=z.strictObject({value:z.string().trim().min(10).max(4096).nullable()}).parse(req.body);
-    if (!options.credential) throw new ApiError(503,'VAULT_UNAVAILABLE','The OS credential store is unavailable.');
-    await options.credential(value);
-    return {updated:true};
+  api.post('/api/control/cleanup-retired-credentials',async req=>{
+    z.strictObject({confirm:z.literal(true)}).parse(req.body);
+    if(!options.cleanupRetiredCredentials)throw missing();
+    await options.cleanupRetiredCredentials();
+    return {removed:true};
   });
   api.post('/api/control/hosted-credential',async req=>{
     if(!options.hosted)throw missing();
@@ -142,13 +116,6 @@ export function createApi(monitor:Monitor,options:{
     monitor.invalidate();
     await options.hosted.credential(value);
     return {updated:true};
-  });
-  api.post('/api/control/verify-x',async req=>{
-    const {source,capCents}=z.strictObject({source:z.enum(['x','session']),capCents:z.number().int().min(1).max(100),confirm:z.literal(true)}).parse(req.body);
-    if(!store.paused)throw new ApiError(409,'PAUSE_REQUIRED','Pause monitoring before running the one-page live acceptance probe.');
-    const collector=source==='x'?options.official:options.localAccount;
-    if(!collector)throw missing();
-    return collector.check(capCents);
   });
   api.post('/api/control/verify-hosted',req=>{
     z.strictObject({confirm:z.literal(true)}).parse(req.body);
@@ -234,7 +201,7 @@ export function createApi(monitor:Monitor,options:{
     return scorePost(post,rule,store.settings);
   });
   api.get('/api/v1/posts',req=>{
-    const query=z.strictObject({q:z.string().max(200).default(''),source:namespaceSchema.optional(),collector:collectorSchema.optional(),listId:z.uuid().optional(),
+    const query=z.strictObject({q:z.string().max(200).default(''),source:namespaceSchema.optional(),collector:historyCollectorSchema.optional(),listId:z.uuid().optional(),
       priority:z.enum(['silent','standard','immediate','delayed']).optional(),kind:kindSchema.optional(),sort:z.enum(['recent','score']).default('recent'),
       limit:z.coerce.number().int().min(1).max(100).default(30),cursor:z.string().max(500).optional()}).parse(req.query);
     const collector=query.collector??(query.source?undefined:store.active.id);
@@ -323,7 +290,7 @@ export function createApi(monitor:Monitor,options:{
   });
   api.get('/api/v1/notifications',req=>{
     const {source,collector,unread,limit,before,beforeId}=z.strictObject({
-      source:namespaceSchema.optional(),collector:collectorSchema.optional(),unread:z.enum(['true','false']).optional(),
+      source:namespaceSchema.optional(),collector:historyCollectorSchema.optional(),unread:z.enum(['true','false']).optional(),
       limit:z.coerce.number().int().min(1).max(100).default(50),
       before:z.coerce.number().int().nonnegative().optional(),beforeId:z.uuid().optional(),
     }).refine(v=>!v.beforeId||v.before!==undefined).parse(req.query);
@@ -340,7 +307,7 @@ export function createApi(monitor:Monitor,options:{
     return {read};
   });
   api.post('/api/v1/notifications/read-all',req=>{
-    const {source,collector,cutoff}=z.strictObject({source:namespaceSchema.optional(),collector:collectorSchema.optional(),cutoff:z.number().int().nonnegative()}).parse(req.body);
+    const {source,collector,cutoff}=z.strictObject({source:namespaceSchema.optional(),collector:historyCollectorSchema.optional(),cutoff:z.number().int().nonnegative()}).parse(req.body);
     const result=store.run(`UPDATE notifications SET read_at=? WHERE read_at IS NULL AND ${source&&!collector?'namespace':'collector'}=? AND decision_at<=?`,monitor.clock(),collector??source??store.active.id,cutoff);
     monitor.signal('notifications.changed','overview.changed');
     return {updated:result.changes};
@@ -381,57 +348,34 @@ export function createApi(monitor:Monitor,options:{
     monitor.signal('settings.changed','overview.changed','source.changed','posts.changed');
     return {...preferences,revision:store.revision('preferences')};
   });
-  api.get('/api/v1/sources',()=>{
-    const now=monitor.clock(), day=new Date(now).toISOString().slice(0,10);
-    const usage=store.get<{requests:number;resources:number}>('SELECT requests,resources FROM usage_buckets WHERE day=?',day);
-    const enabled=store.lists.filter(list=>list.enabled);
-    const publicTopics=[...new Set(enabled.flatMap(list=>list.terms.filter(term=>term.direction==='include').flatMap(term=>{
-      const result=topicSchema.safeParse(term.kind==='hashtag'?'#'+normalize(term.text).replace(/^#/,''):term.text);
-      return result.success?[result.data]:[];
-    })))].sort();
-    const groupCount=new Set(enabled.flatMap(queryGroups)).size;
+  api.get('/api/v1/sources',():SourceInfo[]=>{
     return store.sources.map(row=>{
-      const x=row.id==='x'?options.official:row.id==='session'?options.localAccount:undefined;
-      const signals=store.value<{verified:string[];expires:number;syncing?:boolean;lastSuccess?:number;partial?:boolean;followingComplete?:boolean}|null>(row.id+':signals',null);
-      const session=row.id==='session'?options.localAccount?.account:undefined;
-      const website=options.website?.state.status??'Permission required';
-      const access:SourceCapability['state']=!row.configured||['SESSION_EXPIRED','CREDENTIAL_REQUIRED','INVALID_CREDENTIALS','VERIFICATION_REQUIRED'].includes(row.error_code??'')?'Authentication required':
-        row.error_code==='ACCESS_DENIED'?'Permission required':(row.last_success_at||store.value(row.id+':search-verified',false))?'Available':'Unverified';
-      const features=capabilities(row.id,access,store.value<SourceCapability['state']>(row.id+':lookup-state',access==='Authentication required'?access:'Unverified'),
-        row.status==='Streaming',website,options.hosted?.diagnostics?.delivery);
-      let personalSync:SourceInfo['personalSync'];
-      if(x){
-        const following=store.count("SELECT count(*) n FROM account_relationships WHERE source_id=? AND account_id=? AND kind='following' AND expires_at>?",row.id,row.account_id,now);
-        const liked=store.count("SELECT count(*) n FROM account_relationships WHERE source_id=? AND account_id=? AND kind='liked-author' AND expires_at>?",row.id,row.account_id,now);
-        for(const [name,kind] of [['Following','following'],['Liked-author signals','liked-author']]){
-          features.push({label:name,state:signals&&signals.expires>now&&signals.verified.includes(kind)?'Available':'Permission required',
-            detail:'Requires separate OAuth consent and endpoint entitlement.'});
-        }
-        personalSync={lastSuccess:signals?.lastSuccess??null,following,liked,partial:!!signals&&(!!signals.partial||!!signals.syncing||(!!signals.verified.length&&signals.expires<=now)),
-          followingComplete:!!signals?.followingComplete&&signals.expires>now};
-      }
-      return {id:row.id,active:!!row.active,configured:!!row.configured,
-        status:session&&session.expiresAt<=now&&!session.renewable?'Session expired':row.status,error:row.error_code,
-        gap:row.gap??(row.id==='x'?store.value<string|null>('x:stream-note',null):null),
-        features,coverage:store.coverage(row.id),personalSync,
-        capabilities:[...(monitor.sources.get(row.id)?.capabilities??[]),
-          ...(signals&&signals.expires>now?signals.verified.map(s=>s==='following'?'Following signals available':'Liked-author signals available'):[])],
-        ...(x?{options:x.settings,syncing:signals?.syncing??false,budget:{
-          reservedUsdMicros:store.value('usage:cost:'+day,(usage?.resources??0)*store.settings.maxResourceUsdMicros),
-          dailyUsdCents:store.settings.dailyUsdCents,
-          searchPageUsdMicros:store.settings.maxResourceUsdMicros?x.settings.pageSize*2*store.settings.maxResourceUsdMicros:null,
-        }}:{}),
-        ...(session?{account:session.username,expiresAt:session.expiresAt}:{}),
-        ...(row.id==='hosted'?{hosted:options.hosted?.diagnostics,publicTopics}:{}),
-        projectedRequests:x?Math.ceil(86400/store.settings.intervalSeconds)*Math.min(12,groupCount)*x.settings.pages:0,
-        requests:x?usage?.requests??0:0,resources:x?usage?.resources??0:0,resetAt:Date.parse(day)+86_400_000};
+      const hosted=row.id==='hosted'?options.hosted?.diagnostics:undefined;
+      const browser=row.id==='session'?store.value<BrowserAccount>('session:browser',{status:'Disconnected',persistent:false}):undefined;
+      const session=row.id==='session'?options.website?.state:undefined;
+      return {
+        id:row.id,active:!!row.active,configured:!!row.configured,status:session?.status??row.status,error:row.error_code,
+        lastSuccess:row.last_success_at,gap:row.gap,coverage:store.coverage(row.id),capabilities:[...(monitor.sources.get(row.id)?.capabilities??[])],
+        ...(browser?{browser:{...browser,available:!!options.browserAccount},account:session?.handle??null}:{}),
+        ...(row.id==='hosted'?{hosted,publicTopics:publicTopics(store.lists)}:{}),
+      };
     });
+  });
+  api.post('/api/v1/sources/session/browser',async req=>{
+    if(!options.browserAccount)throw new ApiError(409,'DESKTOP_REQUIRED','Open the Smart Monitor desktop app to use the local X sign-in window.');
+    const action=z.discriminatedUnion('action',[
+      z.strictObject({action:z.literal('open'),remember:z.boolean()}),
+      z.strictObject({action:z.enum(['check','disconnect'])}),
+    ]).parse(req.body);
+    const result=await options.browserAccount(action);
+    store.set('session:browser',result);
+    monitor.signal('source.changed');
+    return result;
   });
   api.put('/api/v1/sources/:id/active',async req=>{
     const {id}=choice.parse(req.params);
     if (id===store.active.id) return monitor.status;
     if(!store.sources.find(s=>s.id===id)?.configured||!monitor.sources.get(id))throw new ApiError(409,'SOURCE_NOT_READY','Configure and authorize this source before selecting it.');
-    if ((id==='x'||id==='session')&&!paid(store.settings)) throw new ApiError(409,'BUDGET_REQUIRED','Confirm positive X API budgets in Settings.');
     if(id==='hosted'&&!options.hosted?.config?.consent)throw new ApiError(409,'CONSENT_REQUIRED','Approve the hosted server and selected topics first.');
     const previous=monitor.sources.get(store.active.id);
     monitor.invalidate();
@@ -448,18 +392,8 @@ export function createApi(monitor:Monitor,options:{
   });
   api.post('/api/v1/sources/:id/check',async(req,res)=>{
     const {id}=choice.parse(req.params);
-    if (id==='x') {
-      if (!options.check) throw missing();
-      await options.check();
-    }
-    if(id==='session'){
-      if(!options.localAccount)throw missing();
-      await options.localAccount.check();
-    }
-    if(id==='hosted'){
-      if(!options.hosted)throw missing();
-      await options.hosted.check();
-    }
+    if(id!=='hosted'||!options.hosted)throw missing();
+    await options.hosted.check();
     return res.status(202).send(monitor.status);
   });
   api.post('/api/v1/sources/mock/replay',()=>{
@@ -475,33 +409,12 @@ export function createApi(monitor:Monitor,options:{
   });
   api.post('/api/v1/sources/:id/disconnect',async req=>{
     const {id}=choice.parse(req.params);
-    if(id==='x'&&options.disconnect)await options.disconnect();
-    else {
-      const source=monitor.sources.get(id);
-      if(!source?.disconnect)throw missing();
-      monitor.invalidate();
-      await source.disconnect();
-    }
+    const source=monitor.sources.get(id);
+    if(!source?.disconnect)throw missing();
+    monitor.invalidate();
+    await source.disconnect();
+    monitor.signal('source.changed','overview.changed','posts.changed');
     return monitor.status;
-  });
-  api.post('/api/v1/sources/x/authorize',async req=>{
-    if (!options.authorize) throw new ApiError(503,'OAUTH_UNAVAILABLE','OAuth is unavailable.');
-    return options.authorize(req.body,origin);
-  });
-  api.post('/api/v1/sources/session/authorize',async req=>{
-    if(!options.localAccount)throw missing();
-    return options.localAccount.authorize(req.body,origin);
-  });
-  api.get('/api/v1/oauth/session/callback',async(req,res)=>{
-    if(!options.localAccount)throw missing();
-    await options.localAccount.callback(req.url,origin);
-    return res.type('text/plain').send('Local X Account connected. Return to Smart Monitor to select the source.');
-  });
-  api.put('/api/v1/sources/:id/options',async req=>{
-    const {id}=choice.parse(req.params);
-    const source=id==='x'?options.official:id==='session'?options.localAccount:undefined;
-    if(!source)throw missing();
-    return source.configure(req.body);
   });
   api.put('/api/v1/sources/hosted/config',async req=>{
     if(!options.hosted)throw missing();
@@ -509,16 +422,6 @@ export function createApi(monitor:Monitor,options:{
     const configured=await options.hosted.configure(req.body);
     monitor.wake();
     return configured;
-  });
-  api.delete('/api/v1/sources/x/signals',async(_req,res)=>{
-    if(!options.clearSignals)throw missing();
-    await options.clearSignals();
-    return res.status(204).send();
-  });
-  api.get('/api/v1/oauth/callback',async(req,res)=>{
-    if (!options.callback) throw missing();
-    await options.callback(req.url,origin);
-    return res.type('text/plain').send('Connection processed. You can close this tab and return to Smart Monitor.');
   });
   api.post('/api/v1/data/erase-preview',req=>{
     const key=nonce();
@@ -557,6 +460,3 @@ export function createApi(monitor:Monitor,options:{
   else api.get('/',(_req,res)=>res.type('text/plain').send('Smart Monitor runs locally. Build the web app to open the dashboard.'));
   return {api,setOrigin:(value:string)=>{origin=value;},clearSessions:()=>{sessions.clear();bootstrap.clear();}};
 }
-
-export const paid=(s:Settings)=>s.consoleBudgetConfirmed&&s.dailyRequests>0&&s.dailyResources>0&&s.dailyUsdCents>0&&s.maxResourceUsdMicros>0;
-export {defaults};

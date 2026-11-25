@@ -1,6 +1,6 @@
 'use client';
 
-import {Database,Radio,RefreshCw} from 'lucide-react';
+import {Database,Radio} from 'lucide-react';
 import Link from 'next/link';
 import {useEffect,useState,type FormEvent} from 'react';
 import {collectorLabel,type CollectionCoverage,type MonitorStatus,type Settings,type Source,type SourceInfo} from '../../../packages/contracts/index';
@@ -9,84 +9,76 @@ import {Mascot} from './mascot/mascot';
 import {Modal,type ProfileSettings,type Run} from './workspace';
 
 export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceInfo[];monitor:MonitorStatus;reduced:boolean;run:Run;busy:boolean}) {
-  const [oauth,setOauth]=useState<'x'|'session'|null>(null),[client,setClient]=useState(''),[follows,setFollows]=useState(true),[likes,setLikes]=useState(false);
-  const [refresh,setRefresh]=useState(false);
-  const [oauthError,setOauthError]=useState('');
-  const [hosted,setHosted]=useState<SourceInfo|null>(null);
-  const [tuning,setTuning]=useState<SourceInfo|null>(null);
-  const [sharing,setSharing]=useState(false);
-  const summaries={mock:'Seeded posts for testing your rules',x:'Your app-only credentials and spending limits',session:'Local OAuth consent for documented X read operations',hosted:'Shared collection for public topics you approve'};
+  const [hosted,setHosted]=useState<SourceInfo|null>(null),[share,setShare]=useState(false),[remember,setRemember]=useState(false);
+  const local=sources.find(source=>source.id==='session');
+  const remote=sources.find(source=>source.id==='hosted');
+  const simulated=sources.find(source=>source.id==='mock');
+  const browserAction=(input:{action:'open';remember:boolean}|{action:'check'|'disconnect'},message?:string)=>
+    void run(()=>request('/sources/session/browser','POST',input),message);
+  const select=(source:SourceInfo)=>void run(()=>request(`/sources/${source.id}/active`,'PUT'),`Selected ${collectorLabel[source.id]}.`);
   return <div className="stack">
-    <div className="list-grid">{sources.map(s=><section key={s.id} className="panel source-card">
-      <div className="panel-heading"><div><h2>{collectorLabel[s.id]}</h2><p>{summaries[s.id]}</p></div><span className="stat-icon">{s.id==='mock'?<Radio size={18}/>:<Database size={18}/>}</span></div>
-      <p><span className="chip">{s.active?'Active · ':''}{s.status}</span></p>
-      {s.error&&<p className="warning">{s.error}</p>}
-      {s.gap&&<p className="subtle">{s.gap}</p>}
-      <dl className="fields">{s.features?.map(feature=><div key={feature.label}><dt>{feature.label}{feature.detail&&<small>{feature.detail}</small>}</dt><dd>{feature.state}</dd></div>)}</dl>
-      {s.id==='x'&&<>
-        <p className="subtle">Set your app-only bearer via <code>npm run monitor -- credentials set</code>. Configure X request and resource budgets in Settings.</p>
-        <dl className="fields"><div><dt>Requests reserved today</dt><dd>{s.requests}</dd></div><div><dt>Resources reserved today</dt><dd>{s.resources}</dd></div><div><dt>Projected requests per day</dt><dd>Up to {s.projectedRequests}</dd></div><div><dt>UTC budget resets</dt><dd>{timestamp(s.resetAt)}</dd></div></dl>
-        <p className="subtle">Filtered Stream uses rules set in your developer app. Recent search also runs at the configured interval.</p>
-      </>}
-      {s.budget&&<dl className="fields">
-        <div><dt>Estimated maximum per search page</dt><dd>{s.budget.searchPageUsdMicros===null?'Set a rate in Settings':usd(s.budget.searchPageUsdMicros)}</dd></div>
-        <div><dt>Estimated USD reserved today</dt><dd>{usd(s.budget.reservedUsdMicros)} of {usd(s.budget.dailyUsdCents*10_000)}</dd></div>
-      </dl>}
-      {s.id==='session'&&<>
-        <p className="subtle">Official OAuth uses X’s consent screen and your app’s API budget. Access and refresh tokens stay in the OS vault.</p>
-        <dl className="fields"><div><dt>Account</dt><dd>{s.account?'@'+s.account:'—'}</dd></div><div><dt>OAuth token expires</dt><dd>{timestamp(s.expiresAt)}</dd></div></dl>
-      </>}
-      {s.personalSync&&<dl className="fields">
-        <div><dt>Last successful signal sync</dt><dd>{timestamp(s.personalSync.lastSuccess)}</dd></div>
-        <div><dt>Signal coverage</dt><dd>{s.syncing?'Paging · checkpoint saved':s.personalSync.partial?'Partial or expired':s.personalSync.followingComplete?'Following sync complete':'Optional'}</dd></div>
-        <div><dt>Following and liked authors</dt><dd>{s.personalSync.following} following · {s.personalSync.liked} liked</dd></div>
-      </dl>}
-      {s.id==='hosted'&&<>
-        <p className="subtle">The VM receives approved public topics. Watchlist filters, X credentials, and personal ranking stay on this device.</p>
-        {s.hosted&&<dl className="fields"><div><dt>Server</dt><dd>{s.hosted.origin}</dd></div><div><dt>Active subscriptions</dt><dd>{s.hosted.topics.join(', ')||'—'}</dd></div>
-          <div><dt>Collection provider</dt><dd>{s.hosted.provider?label(s.hosted.provider):'Unverified'}</dd></div>
-          <div><dt>Delivery</dt><dd>{s.hosted.delivery==='ids'?'Post IDs and links only':s.hosted.delivery}</dd></div><div><dt>Latency estimate</dt><dd>{s.hosted.latencyMs===null?'—':s.hosted.latencyMs+' ms'}</dd></div>
-          {s.hosted.hydration&&<div><dt>Local lookup</dt><dd>{s.hosted.hydration}</dd></div>}</dl>}
-      </>}
+    <div className="grid two">
+      {local&&<section className="panel form-stack">
+        <div className="panel-heading"><div><h2>Local X Account</h2><p>Sign in directly on X in a separate desktop window.</p></div><span className="stat-icon"><Database size={18}/></span></div>
+        <dl className="fields">
+          <div><dt>Browser sign-in</dt><dd>{local.browser?.available?local.browser.status:'Available in the desktop app'}</dd></div>
+          <div><dt>Username</dt><dd>{local.account?'@'+local.account:'Unverified'}</dd></div>
+          <div><dt>Session collection</dt><dd>{local.status}</dd></div>
+          <div><dt>Last successful collection</dt><dd>{timestamp(local.lastSuccess)}</dd></div>
+        </dl>
+        {local.status==='Unsupported'&&<p className="warning">Automatic search requires an authorized X collection interface. Signing in lets you browse X manually.</p>}
+        {local.browser?.status==='Connected'&&<p className="subtle">A local sign-in cookie is present. Confirm the account in the X window.</p>}
+        {local.browser?.status==='Verification required'&&<p className="warning">Complete verification directly in the X window.</p>}
+        {local.browser?.status==='Rate limited'&&<p className="warning">X limited access. Follow the directions shown in the X window.</p>}
+        {local.browser?.status==='Temporarily unavailable'&&<p className="warning">Check your network and unlock your system credential store if you saved a session.</p>}
+        {local.browser?.available&&<>
+          {local.browser.persistent?<p className="subtle">This browser uses a saved session on this device.</p>:
+            <label className="check"><input type="checkbox" checked={remember} onChange={event=>setRemember(event.target.checked)}/> Remember my sign-in on this device when secure storage is available</label>}
+          <div className="actions">
+            <button className="button primary" disabled={busy} onClick={()=>browserAction({action:'open',remember})}>{local.browser.status==='Disconnected'?'Open X sign-in':'Open X account window'}</button>
+            <button className="button" disabled={busy} onClick={()=>browserAction({action:'check'})}>Check browser session</button>
+            <button className="button" disabled={busy||local.browser.status==='Disconnected'} onClick={()=>browserAction({action:'disconnect'},'Local X browser session cleared.')}>Disconnect browser</button>
+          </div>
+        </>}
+        <div className="actions">
+          {local.configured&&<button className="button" disabled={busy||local.active} onClick={()=>select(local)}>{local.active?'Selected':'Use Local X Account'}</button>}
+          <button className="button" disabled={busy} onClick={()=>setShare(true)}>Share selected X post</button>
+        </div>
+      </section>}
+      {remote&&<section className="panel form-stack">
+        <div className="panel-heading"><div><h2>Hosted Monitoring</h2><p>Receive updates from your server for public topics you approve.</p></div><span className="stat-icon"><Database size={18}/></span></div>
+        <dl className="fields">
+          <div><dt>Connection</dt><dd>{remote.status}</dd></div>
+          <div><dt>Client token</dt><dd>{remote.configured?'Saved locally':'Required'}</dd></div>
+          <div><dt>Server</dt><dd>{remote.hosted?.origin??'—'}</dd></div>
+          <div><dt>Subscribed topics</dt><dd>{remote.hosted?.topics.join(', ')||'—'}</dd></div>
+          <div><dt>Last received post</dt><dd>{timestamp(remote.hosted?.lastReceived??null)}</dd></div>
+          <div><dt>Delivery mode</dt><dd>{remote.hosted?.delivery??'Unavailable'}</dd></div>
+        </dl>
+        <p className="subtle">The bundled server supports simulated delivery. Live collection requires an authorized source and redistribution rights.</p>
+        {remote.error&&<p className="warning">{label(remote.error)}{remote.gap?' · '+remote.gap:''}</p>}
+        <div className="actions">
+          <button className="button" disabled={busy} onClick={()=>setHosted(remote)}>Configure server</button>
+          <button className="button" disabled={busy||!remote.configured} onClick={()=>void run(()=>request('/sources/hosted/check','POST'),'Hosted connection checked.')}>Check connection</button>
+          <button className="button primary" disabled={busy||remote.active||!remote.configured} onClick={()=>select(remote)}>{remote.active?'Selected':'Use Hosted Monitoring'}</button>
+          {remote.hosted&&<button className="button" disabled={busy} onClick={()=>void run(()=>request('/sources/hosted/disconnect','POST'),'Hosted Monitoring disconnected.')}>Disconnect</button>}
+        </div>
+      </section>}
+    </div>
+    {simulated&&<section className="panel form-stack">
+      <div className="panel-heading"><div><h2>Simulated</h2><p>Test watchlists, ranking, and alerts with seeded example posts.</p></div><span className="stat-icon"><Radio size={18}/></span></div>
       <div className="actions">
-        <button className="button" disabled={s.active||busy||!s.configured} onClick={()=>void run(()=>request(`/sources/${s.id}/active`,'PUT'),`Selected ${collectorLabel[s.id]}.`)}>{s.active?'Selected':'Use source'}</button>
-        {s.id==='mock'&&s.active&&<button className="button" disabled={busy} onClick={()=>void run(()=>request('/sources/mock/replay','POST'),'A fresh simulated timeline is queued.')}>Replay simulation</button>}
-        {s.id!=='mock'&&(s.id!=='hosted'||s.configured)&&<button className="button" disabled={busy} onClick={()=>void run(()=>request(`/sources/${s.id}/check`,'POST'),s.id==='hosted'?'Hosted connection checked.':'X credentials and recent search verified.')}><RefreshCw size={15}/> Check connection</button>}
-        {s.id!=='mock'&&(s.configured||s.hosted)&&<button className="button" disabled={busy} onClick={()=>void run(()=>request(`/sources/${s.id}/disconnect`,'POST'),s.active?'Disconnected. Monitoring is paused.':'Disconnected.')}>Disconnect</button>}
-        {s.id==='x'&&s.active&&<button className="button" disabled={busy} onClick={()=>{setOauthError('');setOauth('x');}}>Connect personal signals</button>}
-        {s.id==='session'&&<button className="button" disabled={busy} onClick={()=>{setOauthError('');setFollows(false);setOauth('session');}}>{s.configured?'Reconnect official OAuth':'Connect official OAuth'}</button>}
-        {s.id==='session'&&<button className="button" disabled={busy} onClick={()=>setSharing(true)}>Share selected X post</button>}
-        {s.id==='hosted'&&<button className="button" disabled={busy} onClick={()=>setHosted(s)}>Configure hosted service</button>}
-        {s.options&&<button className="button" disabled={busy} onClick={()=>setTuning(s)}>Collection settings</button>}
-        {s.id==='x'&&s.configured&&<button className="button" disabled={busy} onClick={()=>void run(()=>request('/sources/x/signals','DELETE'),'Personal signals cleared.')}>Clear personal signals</button>}
+        <button className="button" disabled={busy||simulated.active} onClick={()=>select(simulated)}>{simulated.active?'Selected':'Use Simulated'}</button>
+        <button className="button" disabled={busy||!simulated.active} onClick={()=>void run(()=>request('/sources/mock/replay','POST'),'Simulation queued.')}>Replay simulation</button>
       </div>
-    </section>)}</div>
-    <section className="panel collector source-diagnostics">
-      <div className="panel-heading"><div><h2>Collection diagnostics</h2><p>Current source and local scheduling state</p></div></div>
-      <Mascot mode={busy?'THINKING':monitor.error?'SAD':'IDLE'} reduced={reduced}/>
-      <dl className="fields"><div><dt>Source</dt><dd>{collectorLabel[monitor.source]}</dd></div><div><dt>Last success</dt><dd>{timestamp(monitor.lastSuccess)}</dd></div><div><dt>Next attempt</dt><dd>{timestamp(monitor.nextDue)}</dd></div><div><dt>Polling interval</dt><dd>{monitor.intervalSeconds} seconds</dd></div></dl>
+    </section>}
+    <section className="panel form-stack">
+      <div className="panel-heading"><div><h2>Monitoring</h2><p>{collectorLabel[monitor.source]} · {monitor.status}</p></div><Mascot mode={monitor.error?'ERROR':'IDLE'} reduced={reduced}/></div>
+      <dl className="fields"><div><dt>Next attempt</dt><dd>{timestamp(monitor.nextDue)}</dd></div><div><dt>Polling interval</dt><dd>{monitor.intervalSeconds} seconds</dd></div></dl>
       <CoverageFields coverage={monitor.coverage}/>
-      {monitor.gap&&<p className="warning">{monitor.gap}</p>}
     </section>
-    {oauth&&<Modal title={oauth==='session'?'Connect with official X OAuth':'Connect personal signals'} close={()=>setOauth(null)}><p>Register <code>{typeof window!=='undefined'?location.origin:''}/api/v1/oauth/{oauth==='session'?'session/':''}callback</code> as the exact redirect URI for a public OAuth client in your developer app.</p>
-      <div className="form-stack"><label>OAuth client ID<input value={client} onChange={e=>setClient(e.target.value)}/></label>
-        <label className="check"><input type="checkbox" checked={follows} onChange={e=>setFollows(e.target.checked)}/> Accounts I follow</label>
-        <label className="check"><input type="checkbox" checked={likes} onChange={e=>setLikes(e.target.checked)}/> Authors of posts I liked</label>
-        <label className="check"><input type="checkbox" checked={refresh} onChange={e=>setRefresh(e.target.checked)}/> Allow refresh using the OS vault</label>
-        {oauthError&&<p className="warning" role="alert">{oauthError}</p>}
-        <button className="button primary" disabled={!client.trim()||(oauth==='x'&&!follows&&!likes)||busy} onClick={()=>void run(async()=>{
-          setOauthError('');
-          try{
-            const result=await request<{url:string}>(`/sources/${oauth}/authorize`,'POST',{clientId:client.trim(),following:follows,likes,refresh});
-            const url=new URL(result.url);
-            if(url.origin!=='https://x.com'||url.pathname!=='/i/oauth2/authorize')throw new Error('Invalid authorization URL.');
-            location.assign(url.toString());
-          }catch(error){setOauthError(error instanceof Error?error.message:'Authorization unavailable');}
-        })}>Continue to X</button>
-      </div></Modal>}
     {hosted&&<HostedSetup source={hosted} busy={busy} close={()=>setHosted(null)} run={run}/>}
-    {tuning?.options&&<CollectionOptions source={tuning} initial={tuning.options} busy={busy} close={()=>setTuning(null)} run={run}/>}
-    {sharing&&<SharePost busy={busy} close={()=>setSharing(false)} run={run}/>}
+    {share&&<SharePost busy={busy} close={()=>setShare(false)} run={run}/>}
   </div>;
 }
 
@@ -97,11 +89,9 @@ export function CoverageFields({coverage}:{coverage?:CollectionCoverage}) {
     <div><dt>Latest attempt</dt><dd>{coverage.posts} posts · {coverage.pages} pages or deliveries</dd></div>
     <div><dt>Oldest covered</dt><dd>{timestamp(coverage.oldest)}</dd></div>
     <div><dt>Newest covered</dt><dd>{timestamp(coverage.newest)}</dd></div>
-    {coverage.budgetBlocked&&<div><dt>Collection budget</dt><dd>Budget prevented collection</dd></div>}
   </dl>;
 }
 
-const usd=(micros:number)=>new Intl.NumberFormat(undefined,{style:'currency',currency:'USD',maximumFractionDigits:6}).format(micros/1_000_000);
 
 function SharePost({busy,close,run}:{busy:boolean;close:()=>void;run:Run}) {
   const [url,setUrl]=useState(''),[excerpt,setExcerpt]=useState(''),[consent,setConsent]=useState(false),[postId,setPostId]=useState('');
@@ -147,22 +137,6 @@ function HostedSetup({source,busy,close,run}:{source:SourceInfo;busy:boolean;clo
     </form>
   </Modal>;
 }
-function CollectionOptions({source,initial,busy,close,run}:{source:SourceInfo;initial:NonNullable<SourceInfo['options']>;busy:boolean;close:()=>void;run:Run}) {
-  const [draft,setDraft]=useState(initial);
-  return <Modal title={collectorLabel[source.id]+' collection settings'} close={close}>
-    <form className="form-stack" onSubmit={e=>{e.preventDefault();void run(()=>request(`/sources/${source.id}/options`,'PUT',draft),'Collection settings saved.').then(saved=>{if(saved)close();});}}>
-      <label>Pages per query per cycle<input type="number" min={1} max={12} required value={draft.pages} onChange={e=>setDraft({...draft,pages:+e.target.value})}/></label>
-      <label>Results per page<input type="number" min={10} max={100} required value={draft.pageSize} onChange={e=>setDraft({...draft,pageSize:+e.target.value})}/></label>
-      <label>Recovery window in hours<input type="number" min={1} max={168} required value={draft.recoveryHours} onChange={e=>setDraft({...draft,recoveryHours:+e.target.value})}/></label>
-      {source.id==='x'&&<>
-        <label className="check"><input type="checkbox" checked={draft.stream} onChange={e=>setDraft({...draft,stream:e.target.checked})}/> Enable Filtered Stream with my configured X rules</label>
-        {draft.stream&&<label className="check"><input type="checkbox" checked={!!draft.streamBudgetConfirmed} onChange={e=>setDraft({...draft,streamBudgetConfirmed:e.target.checked})}/> My X provider enforces a hard spending limit for this stream</label>}
-      </>}
-      <button className="button primary" type="submit" disabled={busy}>Save collection settings</button>
-    </form>
-  </Modal>;
-}
-
 type Preference = {namespace:Source;id:string;handle:string|null;muted:boolean;favorite:boolean};
 export function SettingsPage({settings,run,busy}:{settings:ProfileSettings;run:Run;busy:boolean}) {
   const [draft,setDraft]=useState(settings),[important,setImportant]=useState(settings.importantTerms.join(', '));
@@ -201,15 +175,6 @@ export function SettingsPage({settings,run,busy}:{settings:ProfileSettings;run:R
       <section className="panel form-stack"><h2>Relevance weights</h2><div className="form-grid">{Object.entries(draft.weights).map(([key,value])=><label key={key}>{label(key)}<input type="number" min={key==='term'?1:0} max={100} value={value} onChange={e=>set('weights',{...draft.weights,[key]:+e.target.value})}/></label>)}</div>
         <label>Important terms, separated by commas<input value={important} onChange={e=>setImportant(e.target.value)}/></label>
       </section>
-      <section className="panel form-stack"><h2>Live API budget</h2><p className="subtle">Copy the highest applicable rate from your X Developer Console, including user expansions and OAuth reads. Reserved estimates are separate from actual X billing.</p><div className="form-grid">
-        <label>Daily request ceiling<input type="number" min={0} max={5000} value={draft.dailyRequests} onChange={e=>set('dailyRequests',+e.target.value)}/></label>
-        <label>Daily resource ceiling<input type="number" min={0} max={100000} value={draft.dailyResources} onChange={e=>set('dailyResources',+e.target.value)}/></label>
-        <label>Daily spending ceiling (US cents)<input type="number" min={0} max={1000000} value={draft.dailyUsdCents} onChange={e=>set('dailyUsdCents',+e.target.value)}/></label>
-        <label>Maximum price per resource (millionths of USD)<input type="number" min={0} max={10000000} value={draft.maxResourceUsdMicros} onChange={e=>set('maxResourceUsdMicros',+e.target.value)}/></label></div>
-        <p className="subtle">Current input equals {usd(draft.maxResourceUsdMicros)} per resource. Leave budgets at zero if a price cannot be bounded.</p>
-        <label className="check"><input type="checkbox" checked={draft.hydrateHosted} onChange={e=>set('hydrateHosted',e.target.checked)}/> Use my local X API budget to look up unresolved Hosted posts</label>
-        <label className="check"><input type="checkbox" checked={draft.consoleBudgetConfirmed} onChange={e=>set('consoleBudgetConfirmed',e.target.checked)}/> I set a spending limit in the X Developer Console</label>
-      </section>
       <section className="panel form-stack"><h2>Application and local data</h2><div className="form-grid">
         <label>Retention (days)<input type="number" min={1} max={90} value={draft.retentionDays} onChange={e=>set('retentionDays',+e.target.value)}/></label>
         <label className="check"><input type="checkbox" checked={draft.reduceMotion} onChange={e=>set('reduceMotion',e.target.checked)}/> Reduce motion</label></div>
@@ -219,7 +184,7 @@ export function SettingsPage({settings,run,busy}:{settings:ProfileSettings;run:R
       </section>
     </form>
     <section className="panel form-stack"><h2>Author preferences</h2>{feedback&&<p className="warning">{feedback}</p>}
-      {!authors.length?<p className="subtle">Favorite or mute an author from their post details.</p>:authors.map(author=><div className="preference-row" key={author.namespace+author.id}><strong>{author.handle?'@'+author.handle:author.id}</strong><span className="subtle">{author.namespace==='mock'?'Simulated':'Official X'}</span>
+      {!authors.length?<p className="subtle">Favorite or mute an author from their post details.</p>:authors.map(author=><div className="preference-row" key={author.namespace+author.id}><strong>{author.handle?'@'+author.handle:author.id}</strong><span className="subtle">{author.namespace==='mock'?'Simulated':'X'}</span>
         <div className="actions">{(['favorite','muted'] as const).map(key=><button key={key} className="button" aria-pressed={author[key]} disabled={busy} onClick={()=>void run(async()=>{
           await request(`/authors/${author.namespace}/${author.id}/preferences`,'PUT',{favorite:author.favorite,muted:author.muted,[key]:!author[key]});
           setAuthors(await request('/authors/preferences'));

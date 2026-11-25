@@ -47,19 +47,13 @@ export const settingsSchema = z.strictObject({
   retentionDays:z.number().int().min(1).max(90),
   reduceMotion:z.boolean(), nativeNotifications:z.boolean(),
   simulatedNotifications:z.boolean().default(false),
-  hydrateHosted:z.boolean().default(false),
   officialEmbeds:z.boolean().default(false),
-  dailyRequests:z.number().int().min(0).max(5000),
-  dailyResources:z.number().int().min(0).max(100000),
-  dailyUsdCents:z.number().int().min(0).max(1_000_000).default(0),
-  maxResourceUsdMicros:z.number().int().min(0).max(10_000_000).default(0),
-  consoleBudgetConfirmed:z.boolean(),
 });
 export type Settings = z.infer<typeof settingsSchema>;
 export const defaults: Settings = {
   intervalSeconds:300, dailyCap:20, quiet:{enabled:false,start:'22:00',end:'08:00',zone:Intl.DateTimeFormat().resolvedOptions().timeZone},
   weights:defaultWeights, importantTerms:[], retentionDays:30, reduceMotion:false, nativeNotifications:true,
-  simulatedNotifications:false,hydrateHosted:false,officialEmbeds:false,dailyRequests:0,dailyResources:0,dailyUsdCents:0,maxResourceUsdMicros:0,consoleBudgetConfirmed:false,
+  simulatedNotifications:false,officialEmbeds:false,
 };
 export const feedbackSchema = z.strictObject({rating:z.enum(['useful','irrelevant']).nullable(),favorite:z.boolean()});
 export const preferencesSchema = z.strictObject({muted:z.boolean(),favorite:z.boolean()});
@@ -71,9 +65,11 @@ export const unknownMetrics: Metrics = {likes:null,reposts:null,replies:null,vie
 export const kindSchema = z.enum(['original','reply','repost','quote','unknown']);
 export const namespaceSchema = z.enum(['mock','x']);
 export type Source = z.infer<typeof namespaceSchema>;
-export const collectorSchema = z.enum(['mock','x','session','hosted']);
+export const collectorSchema = z.enum(['mock','session','hosted']);
 export type CollectorId = z.infer<typeof collectorSchema>;
-export const collectorLabel:Record<CollectorId,string> = {mock:'Simulated',x:'Official X API',session:'Local X Account',hosted:'Hosted Monitoring'};
+export const historyCollectorSchema = z.enum(['mock','session','hosted','x']);
+export type HistoryCollectorId = z.infer<typeof historyCollectorSchema>;
+export const collectorLabel:Record<HistoryCollectorId,string> = {mock:'Simulated',x:'Earlier X collection',session:'Local X Account',hosted:'Hosted Monitoring'};
 export type Candidate = {
   namespace: Source; id:string; canonicalId:string; text:string; authorId:string|null; handle:string|null;
   displayName:string|null; language:string|null; createdAt:number|null; kind:z.infer<typeof kindSchema>;
@@ -88,12 +84,12 @@ export type Score = {
   classification:Classification; previousScore?:number;
 };
 export type Match = Score & {listId:string;listName:string;revision:number;suppression:string|null};
-export type Post = Omit<Candidate,'observation'|'text'> & {
+export type Post = Omit<Candidate,'observation'|'text'|'collector'> & {
   text:string|null; originalUrl:string|null; firstSeenAt:number; simulated:boolean; matches:Match[];
   feedback:Feedback; preferences:Preferences; snapshots?:{collectedAt:number;metrics:Metrics}[];
   preview?:'simulation'|'user-shared'|'metadata'|'unresolved'|'stale';
-  provenance?:CollectorId[];
-  hydration?:string;
+  collector?:HistoryCollectorId;
+  provenance?:HistoryCollectorId[];
 };
 export type Alert = {
   id:string; namespace:Source; postId:string|null; listName:string|null; decisionAt:number;
@@ -106,22 +102,20 @@ export type MonitorStatus = {
   coverage?:CollectionCoverage;
 };
 export type CollectionCoverage = {
-  lastAttempt:number|null; pages:number; posts:number; oldest:number|null; newest:number|null; budgetBlocked:boolean;
-};
-export type SourceCapability = {
-  label:string; state:'Available'|'Limited'|'Unverified'|'Authentication required'|'Permission required'|'Unsupported'; detail?:string;
+  lastAttempt:number|null; pages:number; posts:number; oldest:number|null; newest:number|null;
 };
 export type Overview = {today:number;priority:number;lists:number;unread:number;status:MonitorStatus};
+export const browserAccountSchema = z.strictObject({
+  status:z.enum(['Connected','Authentication required','Verification required','Session expired','Restricted','Rate limited','Temporarily unavailable','Disconnected']),
+  persistent:z.boolean(),
+});
+export type BrowserAccount = z.infer<typeof browserAccountSchema>;
 export type SourceInfo = {
   id:CollectorId; active:boolean; configured:boolean; status:string; capabilities:string[];
-  error:string|null; projectedRequests:number; requests:number; resources:number; resetAt:number;
-  account?:string|null; expiresAt?:number|null; gap?:string|null;
-    options?:{pages:number;pageSize:number;recoveryHours:number;stream:boolean;streamBudgetConfirmed?:boolean};
-  syncing?:boolean;
+  error:string|null; lastSuccess:number|null; gap?:string|null;
+  browser?:BrowserAccount&{available:boolean};
+  account?:string|null;
   coverage?:CollectionCoverage;
-  features?:SourceCapability[];
-  personalSync?:{lastSuccess:number|null;partial:boolean;followingComplete:boolean;following:number;liked:number};
   publicTopics?:string[];
-  hosted?:{origin:string;topics:string[];approvedTopics:string[];latencyMs:number|null;delivery:string;provider?:'disabled'|'simulation'|'official-api'|'website-session';consent:boolean;liveTermsAccepted?:boolean;hydration?:string|null};
-  budget?:{reservedUsdMicros:number;dailyUsdCents:number;searchPageUsdMicros:number|null};
+  hosted?:{origin:string;topics:string[];approvedTopics:string[];latencyMs:number|null;lastReceived:number|null;delivery:string;provider?:'disabled'|'simulation'|'website-session';consent:boolean;liveTermsAccepted?:boolean};
 };

@@ -81,3 +81,5 @@ Thumbs.db
 browser-profile-*/
 browser-profiles/
 playwright/.cache/
+**/Network/Cookies*
+**/Login Data*

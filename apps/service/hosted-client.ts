@@ -3,13 +3,13 @@ import {request} from 'node:https';
 import {BlockList,isIP} from 'node:net';
 import {Readable} from 'node:stream';
 import {z} from 'zod';
-import {normalize,type Watchlist} from '../../packages/contracts/index';
+import type {Watchlist} from '../../packages/contracts/index';
 import type {Collector,CommitPage} from '../../packages/collection-core/collector';
-import {hostedEvent,hostedStatus,topicSchema,topicsSchema,type Delivery} from '../../packages/collection-core/hosted';
+import {hostedEvent,hostedStatus,publicTopics,topicsSchema,type Delivery} from '../../packages/collection-core/hosted';
 import {lines,resetTime} from '../../packages/collection-core/http';
 import {ApiError} from './api';
 import {hash,type Store} from './storage';
-import type {Vault} from './x-api';
+import type {Vault} from './credential-store';
 
 const denied=new BlockList();
 for(const [ip,prefix] of [
@@ -80,7 +80,7 @@ export class HostedClient implements Collector {
     if(!config)return undefined;
     const t=this.store.value<Telemetry|null>('hosted:telemetry',null);
     return {origin:config.origin,topics:t?.topics??[],approvedTopics:config.topics,latencyMs:t?.latencyMs??null,delivery:t?.delivery??'unknown',
-      provider:t?.provider,consent:config.consent,liveTermsAccepted:config.liveTermsAccepted,hydration:this.store.value<string|null>('hosted:hydration',null)};
+      provider:t?.provider,lastReceived:this.store.value<number|null>('hosted:last-received',null),consent:config.consent,liveTermsAccepted:config.liveTermsAccepted};
   }
   private setStatus(state:string,error:string|null=null,gap:string|null=null){
     this.store.run("UPDATE data_sources SET status=?,error_code=?,gap=? WHERE id='hosted'",state,error,gap);
@@ -92,10 +92,7 @@ export class HostedClient implements Collector {
     return next;
   }
   allowedTopics(lists:Watchlist[],config:Config){
-    const candidates=new Set(lists.filter(l=>l.enabled).flatMap(l=>l.terms.filter(t=>t.direction==='include').flatMap(t=>{
-      const result=topicSchema.safeParse(t.kind==='hashtag'?'#'+normalize(t.text).replace(/^#/,''):t.text);
-      return result.success?[result.data]:[];
-    })));
+    const candidates=new Set(publicTopics(lists));
     return config.topics.filter(topic=>candidates.has(topic));
   }
   async configure(input:unknown) {
@@ -158,6 +155,11 @@ export class HostedClient implements Collector {
   private async statusResponse(response:Response){
     return hostedStatus.parse(JSON.parse(await this.body(response,16384)));
   }
+  private checkDelivery(value:z.infer<typeof hostedStatus>,config:Config){
+    if(value.delivery==='disabled')return false;
+    if(value.delivery==='simulated'||(value.provider==='website-session'&&config.liveTermsAccepted))return true;
+    throw new ApiError(409,'HOST_COLLECTION_UNSUPPORTED','This VM does not report a supported and approved collection method.');
+  }
   private telemetry(value:z.infer<typeof hostedStatus>,started:number){
     const coverage=value.topics.find(topic=>!/^(?:Queued|Polling)$/.test(topic.state))?.state??this.store.value<string|null>('hosted:replay-gap',null);
     const t:Telemetry={topics:value.topics.map(topic=>topic.topic),delivery:value.delivery,provider:value.provider,latencyMs:Date.now()-started,coverage};
@@ -171,6 +173,7 @@ export class HostedClient implements Collector {
     try {
       const result=await this.statusResponse(await this.call(config,'/v1/status',signal));
       this.telemetry(result,now);
+      this.checkDelivery(result,config);
       this.streamAfter=0;
       this.store.set('next:hosted',0);
       this.setStatus(result.delivery==='disabled'?'Publication unavailable':'Connected',result.delivery==='disabled'?'PUBLICATION_DISABLED':null);
@@ -206,11 +209,20 @@ export class HostedClient implements Collector {
     if(!config?.consent||!this.row.configured)return false;
     const topics=this.allowedTopics(lists,config),started=Date.now();
     try{
+      const deadline=AbortSignal.any([signal,AbortSignal.timeout(12_000)]);
+      const status=await this.statusResponse(await this.call(config,'/v1/status',deadline));
+      if(signal.aborted)return false;
+      if(!this.checkDelivery(status,config)){
+        this.eligible=false;
+        this.telemetry(status,started);
+        this.setStatus('Publication unavailable','PUBLICATION_DISABLED');
+        return false;
+      }
       const update={topics,...(config.liveTermsAccepted?{liveTermsAccepted:true}:{})};
-      const result=await this.subscription(()=>this.call(config,'/v1/subscriptions',AbortSignal.any([signal,AbortSignal.timeout(12_000)]),update).then(r=>this.statusResponse(r)));
+      const result=await this.subscription(()=>this.call(config,'/v1/subscriptions',deadline,update).then(r=>this.statusResponse(r)));
       if(signal.aborted)return false;
       const t=this.telemetry(result,started);
-      this.eligible=result.delivery!=='disabled'&&t.topics.length>0;
+      this.eligible=this.checkDelivery(result,config)&&t.topics.length>0;
       this.setStatus(this.eligible?(this.row.status==='Streaming'?'Streaming':'Connected'):result.delivery==='disabled'?'Publication unavailable':'No approved active topics',
         result.delivery==='disabled'?'PUBLICATION_DISABLED':null,t.coverage);
       return this.eligible;
@@ -220,6 +232,7 @@ export class HostedClient implements Collector {
     const config=this.config;
     if(!config?.consent||!this.eligible||Date.now()<this.streamAfter)return;
     const accepted=new Set(this.allowedTopics(lists,config));
+    let delivery=this.store.value<Telemetry|null>('hosted:telemetry',null)?.delivery;
     const key='hosted:cursor:'+hash(config.origin);
     let cursor=this.store.value(key,0);
     const run=new AbortController();
@@ -244,6 +257,8 @@ export class HostedClient implements Collector {
         const parsed:unknown=JSON.parse(data);
         if(event==='heartbeat'){
           const status=hostedStatus.parse(parsed);
+          if(!this.checkDelivery(status,config))throw new ApiError(409,'HOST_COLLECTION_UNSUPPORTED','The hosted server stopped publishing.');
+          delivery=status.delivery;
           const t=this.telemetry(status,Math.min(Date.now(),status.serverTime));
           this.setStatus('Streaming',null,t.coverage);
           this.streamFailures=0;
@@ -256,6 +271,7 @@ export class HostedClient implements Collector {
         }
         if(event==='post'&&Number.isSafeInteger(id)&&id>cursor){
           const packet=hostedEvent.parse(parsed);
+          if(packet.delivery!==delivery)throw new ApiError(409,'HOST_COLLECTION_UNSUPPORTED','The hosted event does not match the approved delivery mode.');
           const now=Date.now();
           if(accepted.has(packet.topic))commit([{...packet.post,observedAt:Math.min(now,packet.post.observedAt),observation:'hosted:'+packet.post.observation}],
             packet.post.observedAt<now-10*60_000,key,id);
@@ -280,10 +296,11 @@ export class HostedClient implements Collector {
   private failure(error:unknown){
     this.eligible=false;
     const code=error instanceof ApiError?error.code:'HOST_UNAVAILABLE';
-    if(['HOST_ACCESS_DENIED','CLIENT_CREDENTIAL_REQUIRED','HOST_TOKEN_EXPIRED','LIVE_TERMS_REQUIRED'].includes(code)){
+    if(['HOST_ACCESS_DENIED','CLIENT_CREDENTIAL_REQUIRED','HOST_TOKEN_EXPIRED','LIVE_TERMS_REQUIRED','HOST_COLLECTION_UNSUPPORTED'].includes(code)){
       this.streamAfter=Number.MAX_SAFE_INTEGER;
       this.store.set('next:hosted',this.streamAfter);
-      this.setStatus(code==='HOST_TOKEN_EXPIRED'?'Client token expired':code==='LIVE_TERMS_REQUIRED'?'X terms acknowledgement required':'Authentication required',code);
+      this.setStatus(code==='HOST_COLLECTION_UNSUPPORTED'?'Collection unsupported':code==='HOST_TOKEN_EXPIRED'?'Client token expired':
+        code==='LIVE_TERMS_REQUIRED'?'X terms acknowledgement required':'Authentication required',code);
       return;
     }
     if(code!=='HOST_RATE_LIMIT'){
@@ -309,15 +326,7 @@ export class HostedClient implements Collector {
   async disconnect(){
     const config=this.config;
     await this.pause();
-    this.store.db.transaction(()=>{
-      if(this.row.active){
-        this.store.run("UPDATE data_sources SET active=0 WHERE id='hosted'");
-        this.store.run("UPDATE data_sources SET active=1 WHERE id='mock'");
-        this.store.set('paused',true);
-      }
-      this.store.run("UPDATE data_sources SET configured=0,generation=generation+1 WHERE id='hosted'");
-      this.store.run("DELETE FROM monitoring_jobs WHERE collector='hosted'");
-    })();
+    this.store.db.transaction(()=>this.store.deactivate('hosted'))();
     if(config)await this.vault.remove(this.key(config.origin));
     this.store.run("DELETE FROM settings WHERE key LIKE 'hosted:%' OR key='next:hosted'");
     this.store.run("UPDATE data_sources SET vault_ref=NULL WHERE id='hosted'");

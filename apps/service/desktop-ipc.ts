@@ -1,9 +1,13 @@
 import {randomUUID} from 'node:crypto';
+import {browserAccountSchema,type BrowserAccount} from '../../packages/contracts/index';
+import {ApiError} from './api';
 import type {Notify} from './notifier';
 
+export type BrowserAction={action:'open';remember:boolean}|{action:'check'|'disconnect'};
+type Message={type?:string;id?:string;result?:unknown};
 type Parent = {
   postMessage:(message:unknown)=>void;
-  on:(event:'message',listen:(event:{data?:{type?:string;id?:string;result?:string}})=>void)=>void;
+  on:(event:'message',listen:(event:{data?:Message})=>void)=>void;
 };
 const port=(process as NodeJS.Process & {parentPort?:Parent}).parentPort;
 export function desktopBridge() {
@@ -13,10 +17,12 @@ export function desktopBridge() {
   }:undefined);
   if(!transport)return null;
   const pending=new Map<string,{result:(state:'submitted'|'unavailable')=>void;click?:()=>void}>();
+  const accountRequests=new Map<string,(result:unknown)=>void>();
   let onStop=()=>{};
   transport.on('message',({data})=>{
     if(data?.type==='shutdown'){onStop();return;}
     if(!data?.id)return;
+    if(data.type==='browser-account-result'){accountRequests.get(data.id)?.(data.result);return;}
     const request=pending.get(data.id);
     if(data.type==='notification-click'){request?.click?.();pending.delete(data.id);}
     else if(data.type==='notification-result')request?.result(data.result==='submitted'?'submitted':'unavailable');
@@ -34,5 +40,19 @@ export function desktopBridge() {
     },click:onClick});
     transport.postMessage({type:'notification',id,title,message});
   });
-  return {notify,onShutdown:(stop:()=>void)=>{onStop=stop;},send:(message:unknown)=>transport.postMessage(message)};
+  const account=(action:BrowserAction,remembered:boolean)=>new Promise<BrowserAccount>((resolve,reject)=>{
+    const id=randomUUID();
+    const failed=()=>new ApiError(503,'DESKTOP_SESSION_UNAVAILABLE','The local X sign-in window could not complete this action.');
+    const timer=setTimeout(()=>{accountRequests.delete(id);reject(failed());},15_000);
+    timer.unref();
+    accountRequests.set(id,result=>{
+      clearTimeout(timer);accountRequests.delete(id);
+      const parsed=browserAccountSchema.safeParse(result);
+      if(parsed.success)resolve(parsed.data);
+      else reject(failed());
+    });
+    try {transport.postMessage({type:'browser-account',id,...action,remembered});}
+    catch {clearTimeout(timer);accountRequests.delete(id);reject(failed());}
+  });
+  return {notify,account,onShutdown:(stop:()=>void)=>{onStop=stop;},send:(message:unknown)=>transport.postMessage(message)};
 }

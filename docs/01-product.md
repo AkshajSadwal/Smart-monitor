@@ -8,11 +8,11 @@ One person, one local OS profile, one monitor. The product helps someone followi
 | Document | Use it for |
 | --- | --- |
 | [Technical architecture](02-architecture.md) | Process ownership, ranking, security, notifications and distribution |
-| [Collection feasibility](03-collection.md) | X access, prices, limits, capabilities and uncertainties |
+| [Collection feasibility](03-collection.md) | Session authorization and capabilities |
 | [UI/UX specification](04-interface.md) | Screen behavior, glass theme, accessibility and inspected mascot manifest |
 | [Database and local API](05-data-api.md) | Entities, transactions, requests, errors and events |
 | [Implementation roadmap](06-roadmap.md) | Milestones, fixtures, acceptance tests and release gates |
-| [Sol 6.2 (High) handoff](07-sol-handoff.md) | Copy-ready build instructions with the six specifications as project context |
+| [Source setup and deployment](09-multi-source.md) | Local sign-in, simulated collection and hosted SSE |
 
 ## Users and smallest useful release
 
@@ -24,12 +24,12 @@ The first demonstrable product is the complete **simulated monitoring loop**. Fr
 
 | Journey | Product behavior | Acceptance observation |
 | --- | --- | --- |
-| First run | Explain simulated versus live, show where data lives, accept or edit a starter watchlist, preview a fixture and start explicitly | No paid request on install. The first match identifies its source, rule and time |
+| First run | Explain simulated versus live, show where data lives, accept or edit a starter watchlist, preview a fixture and start explicitly | No live collection on install. The first match identifies its source, rule and time |
 | Manage topics | Create, rename, duplicate by creating from the editor, pause, resume and delete a watchlist. Include words, hashtags, phrases, ANY/ALL, exclusions, authors, language, favorites, engagement floor and alert rules | Editing affects future collection. Deleting one list preserves posts and other lists' matches and alert history |
 | Follow activity | Search retained post text and handles, filter by source, list, kind or priority, sort by time or score, inspect reasons, open original when available | One feed item per source post, all matching list names available, unknown metrics labeled |
 | Train preferences | Useful and Not relevant change future author affinity. Favorite bookmarks a local post and contributes to affinity. Mute author excludes future matches and alerts. Settings can undo a mute or favorite an account | Changes take effect on the following decision. Historical notification explains its original score |
 | Receive selectively | Each list has standard and immediate thresholds and a cooldown. Priority can rise on a selective recheck. Pause, quiet hours and a daily cap govern interruptions | One original alert per canonical post across lists, even after process restart. A suppressed match remains inspectable |
-| Operate unattended | Show source, collection method, last success, next attempt, rate/budget status and service state. Closing the tab leaves collection running while its local process and user session are active | Restart after sleep or loss of network without a burst of catch-up alerts |
+| Operate unattended | Show source, collection method, last success, next attempt, rate and authorization status and service state. Closing the tab leaves collection running while its local process and user session are active | Restart after sleep or loss of network without a burst of catch-up alerts |
 | Control private data | Inspect enabled account signals, disable them, disconnect credentials, change retention, or erase local data | Disconnect stops live work and clears account-derived signals. Erasure includes history, settings and stored secrets |
 
 ## Decisions and their release boundary
@@ -38,10 +38,10 @@ The first demonstrable product is the complete **simulated monitoring loop**. Fr
 | --- | --- |
 | 1. Browser or wrapper for MVP? | Local browser, same-origin static Next.js UI served by Fastify |
 | 2. Who runs after tab close? | A separately launched per-user Node service. The scheduler has no browser dependency |
-| 3. Safest live data path? | Official, read-only X API with the user's own developer app and budget. Simulated is the default |
-| 4. Near-real-time? | Only label a connected, entitled filtered stream as streaming. Search displays its polling interval and last successful check |
+| 3. Safest live data path? | Local and hosted collection require approved read interfaces. Simulated is the default test source |
+| 4. Near-real-time? | Show hosted SSE delivery state and the last successful collection |
 | 5. Personal signals? | Local favorites, mutes and feedback always work. Own follows and own liked-post authors require available API data and explicit opt-in. Unknown stays unknown |
-| 6. Without paid API access? | Entire simulated flow, including native alert attempts, scoring, rechecks, history, feedback and settings |
+| 6. Without an authorized collection interface? | Entire simulated flow, including native alert attempts, scoring, rechecks, history, feedback and settings |
 | 7. Desktop notifications? | Backend dispatch to a native adapter from a logged-in desktop session. Durable in-app history covers denied permissions, unavailable OS actions and delivery uncertainty |
 | 8. Distribution? | Source installation and local CLI for MVP. Signed per-user desktop distribution, tray, login launch and updates in the desktop phase |
 | 9. Mascot? | Port the existing procedural body, coat, controller, scene, portrait store, reduced-motion hook and scoped styles. The exact copy list is in the UI specification |
@@ -56,5 +56,5 @@ Local storage, loopback networking, read-only X access and an independently runn
 - **Confirmed.** The workspace was empty at inspection. The reference character is generated by Three.js and has a non-WebGL fallback. X publishes recent-search, stream, authentication and usage documentation. The collection assessment links the relevant sources.
 - **Working assumptions.** Single-user installation and one active source at a time. English interface initially, Unicode watch terms and language filters from day one. Proposed thresholds, weights and retention are editable product defaults.
 - **Risks.** Search coverage and cost vary with topic volume. Stream disconnects create gaps. A desktop OS may suppress a toast. A disconnected client can retain stale X content. The architecture and roadmap give a recovery or release test for each.
-- **Owner input when enabling paid access.** Supply the developer app, confirm its permitted use, choose a real spending ceiling and opt into any personal signals. Zero spend and simulated mode are sufficient to build and evaluate the MVP.
+- **Owner input for live access.** Confirm the allowed session interface and publication rights before enabling live data. The simulator covers the local pipeline.
 - **Owner input before public distribution.** Choose publisher identity, signing credentials, release channels, target OS versions and approved product branding. These decisions gate public installers, not local development.

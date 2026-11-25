@@ -3,6 +3,7 @@ const {fork,spawn}=require('node:child_process');
 const {createRequire}=require('node:module');
 const {appendFileSync,existsSync,mkdirSync,readFileSync,statSync,writeFileSync,unlinkSync}=require('node:fs');
 const {join,resolve,dirname}=require('node:path');
+const {browserAccount}=require('./account.cjs');
 
 app.setAppUserModelId('local.smartmonitor.app');
 const profile=process.env.MONITOR_PROFILE?resolve(process.env.MONITOR_PROFILE):join(
@@ -22,6 +23,7 @@ let worker,window,tray,stopping=false,retry,attempt=0,quitInProgress=false;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const icon=()=>nativeImage.createFromPath(join(__dirname,'tray.png'));
 const allowX=url=>/^https:\/\/x\.com\/i\/web\/status\/\d{1,25}$/.test(url);
+const account=browserAccount();
 
 async function control(route,method='GET',body){
   const {origin,token}=JSON.parse(readFileSync(runtime,'utf8'));
@@ -71,6 +73,12 @@ async function ensureWorker(){
     }
     if(message?.type==='notification'&&/^[\da-f-]{36}$/i.test(message.id)&&typeof message.title==='string'&&message.title.length<=128
       &&typeof message.message==='string'&&message.message.length<=500)showNotice(message,child);
+    if(message?.type==='browser-account'&&/^[\da-f-]{36}$/i.test(message.id)&&
+      ['open','check','disconnect'].includes(message.action)&&typeof message.remembered==='boolean'&&
+      (message.action!=='open'||typeof message.remember==='boolean')){
+      const reply=result=>{if(child.connected)child.send({type:'browser-account-result',id:message.id,result});};
+      void account(message).then(reply,()=>reply(null));
+    }
     if(message?.type==='activate'){
       if(typeof message.url==='string'&&allowX(message.url))void shell.openExternal(message.url);
       else if(typeof message.id==='string'&&/^[\w-]{1,100}$/.test(message.id))void openWindow({post:message.id,source:message.source==='x'?'x':'mock'}).catch(report);
@@ -113,8 +121,6 @@ async function openWindow(detail={}){
     window.webContents.on('will-navigate',(event,target)=>{
       if(new URL(target).origin===origin)return;
       event.preventDefault();
-      const external=new URL(target);
-      if(external.origin==='https://x.com'&&external.pathname==='/i/oauth2/authorize')void shell.openExternal(external.href);
     });
     window.webContents.on('will-redirect',(event,target)=>{
       if(new URL(target).origin!==origin)event.preventDefault();
@@ -149,8 +155,8 @@ function setLogin(enabled){
   mkdirSync(dirname(startupPath),{recursive:true,mode:0o700});
   writeFileSync(startupPath,`[Desktop Entry]\nType=Application\nName=Smart Monitor\nExec="${exec}" --background\nTerminal=false\n`,{mode:0o600});
 }
-function openCredentialTerminal(kind='credentials'){
-  if(!['credentials','hosted-credential'].includes(kind))throw new Error('Unsupported credential action.');
+function openCredentialTerminal(){
+  const kind='hosted-credential';
   if(!nodeBinary||!existsSync(nodeBinary))throw new Error('The local Node.js runtime is unavailable.');
   const env={...process.env,MONITOR_PROFILE:profile};
   const quote=value=>"'"+value.replaceAll("'","'\\''")+"'";
@@ -165,7 +171,7 @@ function openCredentialTerminal(kind='credentials'){
     const command=`MONITOR_PROFILE=${quote(profile)} ${quote(nodeBinary)} ${quote(servicePath)} ${kind} set`;
     child=spawn('/usr/bin/osascript',['-e','on run argv','-e','tell application "Terminal" to do script (item 1 of argv)','-e','end run',command],{env,stdio:'ignore'});
   } else child=spawn('x-terminal-emulator',['-e',nodeBinary,servicePath,kind,'set'],{env,stdio:'ignore'});
-  child.on('error',()=>report(new Error('Open a terminal and use the bundled service CLI to set your X credential.')));
+  child.on('error',()=>report(new Error('Open a terminal and use the bundled service CLI to save the hosted client token.')));
   child.unref();
 }
 async function stopWorker(){
@@ -195,13 +201,12 @@ async function refreshTray(){
   const status=await getStatus();
   if(!tray||stopping)return;
   tray.setContextMenu(Menu.buildFromTemplate([
-    {label:status?`${{mock:'Simulated',x:'Official X API',session:'Local X Account',hosted:'Hosted Monitoring'}[status.source]??'Collection'} · ${status.status}`:'Service starting',enabled:false},
+    {label:status?`${{mock:'Simulated',session:'Local X Account',hosted:'Hosted Monitoring'}[status.source]??'Collection'} · ${status.status}`:'Service starting',enabled:false},
     {label:'Open Smart Monitor',click:()=>void openWindow().catch(report)},
     {label:status?.paused?'Resume monitoring':'Pause monitoring',enabled:!!status,click:()=>void control('pause','POST',{paused:!status?.paused}).then(refreshTray).catch(report)},
     {label:'Launch at login',type:'checkbox',checked:app.isPackaged&&loginEnabled(),enabled:app.isPackaged,
       click:item=>{try{setLogin(item.checked);}catch(error){report(error);}void refreshTray().catch(report);}},
-    {label:'Set X credential in terminal…',click:()=>{try{openCredentialTerminal();}catch(error){report(error);}}},
-    {label:'Set hosted credential in terminal…',click:()=>{try{openCredentialTerminal('hosted-credential');}catch(error){report(error);}}},
+    {label:'Set hosted credential in terminal…',click:()=>{try{openCredentialTerminal();}catch(error){report(error);}}},
     ...(canUpdate()?[{label:'Check for updates',click:()=>void checkUpdates().catch(report)}]:[]),
     {type:'separator'},
     {label:'Quit Smart Monitor',click:()=>app.quit()},

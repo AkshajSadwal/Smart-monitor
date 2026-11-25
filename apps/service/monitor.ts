@@ -8,7 +8,6 @@ import {canonicalUrl,hash,json,type Store} from './storage';
 import {notifyNative,type Notify} from './notifier';
 
 const minute=60_000;
-export type LiveCollector = Collector;
 export class Monitor {
   readonly events = new EventEmitter();
   private timer?:NodeJS.Timeout;
@@ -91,12 +90,11 @@ export class Monitor {
     const lists=this.store.lists.filter(l=>l.enabled);
     if ((lists.length||source==='hosted') && collector && now>=this.store.value(`next:${source}`,0)) {
       const next=now+1000*settings.intervalSeconds;
-      if(source==='mock'||source==='hosted')this.store.changeCoverage(source,{lastAttempt:now,pages:0,posts:0,budgetBlocked:false});
+      this.store.changeCoverage(source,{lastAttempt:now,pages:0,posts:0});
       const success=await collector.collect(lists,now,signal,this.commit(source,lists,signal));
       if (signal.aborted) return;
       if (success) this.success(source,now,next);
       else if (this.store.value(`next:${source}`,0)<=now) this.store.set(`next:${source}`,next);
-      if(source==='hosted'&&!signal.aborted)await this.hydrateHosted(lists,now,signal);
       if(success&&!signal.aborted&&collector.refreshSignals){
         const key=source+':signals',before=this.store.value(key,null);
         await collector.refreshSignals(now,signal);
@@ -119,31 +117,6 @@ export class Monitor {
       if (alert) this.deliver(alert);
     }
   }
-  private async hydrateHosted(lists:Watchlist[],now:number,signal:AbortSignal){
-    if(!this.store.settings.hydrateHosted)return;
-    const x=this.sources.get('x');
-    if(!x?.hydrate)return;
-    const ids=this.store.all<{id:string}>(`SELECT p.id FROM posts p
-      JOIN post_sources s ON s.namespace=p.namespace AND s.post_id=p.id AND s.collector='hosted'
-      LEFT JOIN post_display d ON d.namespace=p.namespace AND d.post_id=p.id
-      WHERE p.namespace='x' AND p.text IS NULL AND p.first_seen_at>? AND coalesce(json_extract(d.metadata,'$.lookupAt'),0)<?
-      ORDER BY p.first_seen_at DESC,p.id LIMIT 10`,now-24*60*minute,now-30*minute).map(row=>row.id);
-    if(!ids.length)return;
-    const {posts,removed,status}=await x.hydrate(ids,now,signal);
-    if(signal.aborted||this.store.active.id!=='hosted'||this.store.paused)return;
-    this.store.db.transaction(()=>{
-      this.store.set('hosted:hydration',status);
-      for(const id of ids)this.store.run("INSERT INTO post_display VALUES ('x',?,json_object('lookupAt',?,'lookupStatus',?)) ON CONFLICT(namespace,post_id) DO UPDATE SET metadata=json_set(post_display.metadata,'$.lookupAt',?,'$.lookupStatus',?)",
-        id,now,status,now,status);
-      for(const id of removed)this.store.removeX(id);
-      for(const post of posts){
-        const original=this.store.row('x',post.id);
-        if(!original)continue;
-        this.ingest({...post,collector:'hosted'},lists,now,false,now-original.first_seen_at>10*minute);
-        this.store.provenance({...post,collector:'x'});
-      }
-    })();
-  }
   private commit(source:CollectorId,lists:Watchlist[],signal:AbortSignal):CommitPage {
     return (posts,historical,key,state)=>{
       if (signal.aborted||this.store.active.id!==source||this.store.paused)return;
@@ -151,10 +124,11 @@ export class Monitor {
       this.store.db.transaction(()=>{
         for (const post of posts) this.ingest({...post,collector:source},lists,now,false,historical);
         if(key)this.store.set(key,state);
-        if(source==='mock'||source==='hosted'){
+        if(source==='hosted'&&posts.length)this.store.set('hosted:last-received',now);
+        if(posts.length||source==='mock'){
           const coverage=this.store.coverage(source);
           const times=posts.flatMap(post=>post.createdAt===null?[]:[post.createdAt]);
-          if(posts.length||source==='mock')this.store.changeCoverage(source,{pages:coverage.pages+1,posts:coverage.posts+posts.length,
+          this.store.changeCoverage(source,{pages:coverage.pages+1,posts:coverage.posts+posts.length,
             ...(times.length?{oldest:Math.min(coverage.oldest??Infinity,...times),newest:Math.max(coverage.newest??0,...times)}:{})});
         }
       })();
@@ -167,9 +141,14 @@ export class Monitor {
   }
   private success(source:CollectorId,now:number,next:number) {
     this.store.set(`next:${source}`,next);
-    this.store.run("UPDATE data_sources SET status=CASE WHEN status='Streaming' THEN status ELSE 'Polling' END,last_success_at=?,error_code=NULL WHERE id=?",now,source);
+    this.store.run("UPDATE data_sources SET status=CASE WHEN status IN ('Streaming','Connected') THEN status ELSE 'Polling' END,last_success_at=?,error_code=NULL WHERE id=?",now,source);
   }
   ingest(post:Candidate,lists:Watchlist[],now:number,recheck:boolean,historical:boolean) {
+    if(post.namespace==='x'){
+      if(this.store.blockedX(post.id))return;
+      const existing=this.store.get<{id:string}>('SELECT id FROM posts WHERE namespace=? AND canonical_id=? ORDER BY first_seen_at,id LIMIT 1',post.namespace,post.canonicalId);
+      if(existing)post={...post,id:existing.id};
+    }
     if(post.collector==='hosted'&&post.namespace==='x'&&!post.text&&this.store.row('x',post.id)){
       this.store.provenance(post);
       return;
@@ -211,7 +190,7 @@ export class Monitor {
     const relation=(kind:string)=>this.store.get<{value:number}>(`
       SELECT a.value FROM account_relationships a JOIN data_sources d ON d.id=a.source_id AND d.account_id=a.account_id
       WHERE a.source_id=? AND a.author_id=? AND a.kind=? AND a.expires_at>?`,
-      namespace==='x'?(this.store.active.id==='session'?'session':'x'):'mock',authorId,kind,now)?.value;
+      namespace==='x'?'session':'mock',authorId,kind,now)?.value;
     const relationship=storeFollowing(this.store,namespace,authorId,now);
     const authorLikes=namespace==='x'&&authorId&&candidate.metrics.likes!==null&&candidate.createdAt!==null?
       this.store.all<{likes:number}>(`SELECT json_extract(metrics_json,'$.likes') AS likes FROM posts
@@ -274,7 +253,7 @@ export class Monitor {
         this.store.get('SELECT 1 FROM notifications WHERE namespace=? AND canonical_id=?',job.namespace,row.canonical_id)) return [];
       return [{job,post:this.store.candidate(row)}];
     });
-    const fresh=source==='x'||source==='session' ? this.store.all<import('./storage').PostRow>(
+    const fresh=source==='session' ? this.store.all<import('./storage').PostRow>(
       "SELECT p.*,a.handle,a.display_name FROM posts p LEFT JOIN authors a ON p.namespace=a.namespace AND p.author_id=a.id WHERE p.namespace='x' AND p.verified_at<=? AND EXISTS(SELECT 1 FROM post_sources s WHERE s.post_id=p.id AND s.namespace=p.namespace AND s.collector=?) LIMIT 25",
       now-23*60*minute,source).map(row=>this.store.candidate(row)) : [];
     if (!jobs.length && !fresh.length) return;
@@ -284,7 +263,7 @@ export class Monitor {
     if (signal.aborted) return;
     this.store.db.transaction(()=>{
       for (const id of growth.removed) {
-        if(source!=='x'&&source!=='session')continue;
+        if(source!=='session')continue;
         this.store.removeX(id);
       }
       for (const job of jobs) {
@@ -353,8 +332,6 @@ export class Monitor {
       this.store.run('DELETE FROM authors WHERE rowid IN (SELECT a.rowid FROM authors a WHERE last_seen_at<? AND NOT EXISTS(SELECT 1 FROM posts p WHERE p.author_id=a.id AND p.namespace=a.namespace) AND NOT EXISTS(SELECT 1 FROM author_preferences f WHERE f.author_id=a.id AND f.namespace=a.namespace) LIMIT 250)',cutoff);
       this.store.run('DELETE FROM account_relationships WHERE expires_at<?',now);
       this.store.run("UPDATE posts SET text=NULL,content_hash=NULL WHERE rowid IN (SELECT rowid FROM posts WHERE namespace='x' AND verified_at<? AND text IS NOT NULL LIMIT 250)",now-24*60*minute);
-      this.store.run('DELETE FROM usage_buckets WHERE day<?',new Date(cutoff).toISOString().slice(0,10));
-      this.store.run("DELETE FROM settings WHERE key LIKE 'usage:cost:%' AND key<?",'usage:cost:'+new Date(cutoff).toISOString().slice(0,10));
       const cutoffDate=new Date(cutoff).toISOString().slice(0,10);
       this.store.run("DELETE FROM notification_limits WHERE (key LIKE 'cap:%' AND key<?) OR (key NOT LIKE 'cap:%' AND value<?)",'cap:'+cutoffDate,cutoff);
     })();
@@ -364,7 +341,7 @@ export class Monitor {
 
 function storeFollowing(store:Store,namespace:Source,author:string|null,now:number) {
   if(namespace!=='x'||!author)return undefined;
-  const id=store.active.id==='session'?'session':'x';
+  const id='session';
   const state=store.value<{followingComplete:boolean;accountId:string;expires:number}|null>(id+':signals',null);
   return state?.followingComplete&&state.expires>now&&store.sources.find(row=>row.id===id)?.account_id===state.accountId?0:undefined;
 }

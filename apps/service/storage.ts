@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import {createHash,randomUUID} from 'node:crypto';
 import {existsSync,rmSync} from 'node:fs';
-import { defaults,normalize,termKey,unknownMetrics,type Alert,type Candidate,type CollectionCoverage,type CollectorId,type Feedback,type Match,type Post,type Preferences,type Rule,type Settings,type Source,type Watchlist } from '../../packages/contracts/index';
+import { defaults,normalize,termKey,unknownMetrics,type Alert,type Candidate,type CollectionCoverage,type CollectorId,type Feedback,type HistoryCollectorId,type Match,type Post,type Preferences,type Rule,type Settings,type Source,type Watchlist } from '../../packages/contracts/index';
 
 const migrations = [
   `
@@ -100,6 +100,21 @@ const migrations = [
   UPDATE notifications SET collector=namespace;
   CREATE INDEX notifications_collector ON notifications(collector,decision_at DESC,id DESC);
   `,
+  `
+  INSERT INTO settings(key,value_json) SELECT 'paused','true'
+    WHERE EXISTS(SELECT 1 FROM data_sources WHERE id IN ('x','session') AND active=1)
+    ON CONFLICT(key) DO UPDATE SET value_json='true',revision=revision+1;
+  INSERT INTO settings(key,value_json) SELECT 'retired:session:last-success',json(last_success_at) FROM data_sources
+    WHERE id='session' AND last_success_at IS NOT NULL;
+  UPDATE data_sources SET active=0,configured=0,generation=generation+1,error_code=NULL,gap=NULL,
+    status=CASE id WHEN 'x' THEN 'Retired' ELSE 'Unsupported' END,account_id=NULL,vault_ref=NULL WHERE id IN ('x','session');
+  UPDATE data_sources SET active=1 WHERE id='mock' AND NOT EXISTS(SELECT 1 FROM data_sources WHERE active=1);
+  UPDATE data_sources SET last_success_at=NULL WHERE id='session';
+  UPDATE settings SET value_json=json_remove(value_json,'$.dailyRequests','$.dailyResources','$.dailyUsdCents',
+    '$.maxResourceUsdMicros','$.consoleBudgetConfirmed','$.hydrateHosted'),revision=revision+1 WHERE key='preferences';
+  DELETE FROM monitoring_jobs WHERE collector IN ('x','session');
+  CREATE INDEX canonical_history ON posts(namespace,canonical_id,first_seen_at,id);
+  `,
 ];
 
 export const hash = (value:string) => createHash('sha256').update(value).digest('hex');
@@ -155,10 +170,19 @@ export class Store {
   set(key:string,value:unknown) {this.run('INSERT INTO settings VALUES (?,?,1) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,revision=revision+1',key,JSON.stringify(value));}
   get settings():Settings {return {...defaults,...this.value<Partial<Settings>>('preferences',{})};}
   get paused() {return this.value('paused',true);}
-  get sources() {return this.all<SourceRow>('SELECT * FROM data_sources ORDER BY id');}
+  get sources() {return this.all<SourceRow>("SELECT * FROM data_sources WHERE id IN ('session','hosted','mock') ORDER BY id");}
   get active() {return this.get<SourceRow>('SELECT * FROM data_sources WHERE active=1')!;}
+  deactivate(id:Exclude<CollectorId,'mock'>) {
+    if(this.run('UPDATE data_sources SET active=0 WHERE id=? AND active=1',id).changes){
+      this.run("UPDATE data_sources SET active=1 WHERE id='mock'");
+      this.set('paused',true);
+    }
+    this.run('UPDATE data_sources SET configured=0,generation=generation+1 WHERE id=?',id);
+    this.run('DELETE FROM monitoring_jobs WHERE collector=?',id);
+  }
   coverage(id:CollectorId) {
-    return this.value<CollectionCoverage>('coverage:'+id,{lastAttempt:null,pages:0,posts:0,oldest:null,newest:null,budgetBlocked:false});
+    const saved=this.value<CollectionCoverage|null>('coverage:'+id,null);
+    return {lastAttempt:saved?.lastAttempt??null,pages:saved?.pages??0,posts:saved?.posts??0,oldest:saved?.oldest??null,newest:saved?.newest??null};
   }
   changeCoverage(id:CollectorId,update:Partial<CollectionCoverage>) {
     this.set('coverage:'+id,{...this.coverage(id),...update});
@@ -191,13 +215,12 @@ export class Store {
     const p=this.candidate(row);
     const [source,id]=[p.namespace,p.id];
     const saved=source==='x'?this.get<{metadata:string}>("SELECT metadata FROM post_display WHERE namespace='x' AND post_id=?",id):undefined;
-    const display=saved?json<{shared?:string;lookupStatus?:string}>(saved.metadata):undefined;
+    const display=saved?json<{shared?:string}>(saved.metadata):undefined;
     const preview=display?.shared;
     const stale=source==='x'&&now!==undefined&&row.verified_at!==null&&row.verified_at<now-24*60*60_000;
-    const provenance=this.all<{collector:CollectorId}>('SELECT collector FROM post_sources WHERE namespace=? AND post_id=? ORDER BY observed_at DESC,collector',source,id).map(value=>value.collector);
+    const provenance=this.all<{collector:HistoryCollectorId}>('SELECT collector FROM post_sources WHERE namespace=? AND post_id=? ORDER BY observed_at DESC,collector',source,id).map(value=>value.collector);
     return {namespace:source,id,canonicalId:p.canonicalId,text:source==='mock'?p.text:preview??null,
       preview:source==='mock'?'simulation':preview?'user-shared':stale?'stale':p.text?'metadata':'unresolved',
-      ...(!p.text&&display?.lookupStatus?{hydration:display.lookupStatus}:{}),
       authorId:p.authorId,handle:source==='mock'?p.handle:null,displayName:source==='mock'?p.displayName:null,
       language:stale?null:p.language,createdAt:stale?null:p.createdAt,kind:stale?'unknown':p.kind,metrics:stale?unknownMetrics:p.metrics,observedAt:p.observedAt,
       simulated:source==='mock',firstSeenAt:row.first_seen_at,originalUrl:canonicalUrl(source,id),

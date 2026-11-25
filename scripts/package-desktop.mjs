@@ -21,14 +21,14 @@ for(const name of Object.keys(metadata.dependencies)){
 metadata.name='smart-monitor';
 metadata.build.electronVersion=electron;
 metadata.build.npmRebuild=false;
-metadata.build.directories.output=join(root,'release');
-metadata.build.files=['main.cjs','tray.png','package.json','!node_modules{,/**/*}'];
+metadata.build.directories.output=resolve(root,process.env.MONITOR_DESKTOP_RELEASE??'release');
+metadata.build.files=['main.cjs','account.cjs','tray.png','package.json','!node_modules{,/**/*}'];
 metadata.build.extraResources=[{from:'web',to:'web'},{from:'worker',to:'service'},{from:'node_modules',to:'service/node_modules'},{from:'runtime',to:'runtime'}];
 metadata.build.win.icon='app.ico';
 const rootManifest=JSON.parse(readFileSync(join(root,'package.json'),'utf8'));
 metadata.allowScripts=rootManifest.allowScripts;
 writeFileSync(join(stage,'package.json'),JSON.stringify(metadata,null,2));
-for(const file of ['main.cjs','tray.png','installer.nsh'])copyFileSync(join(root,'apps','desktop',file),join(stage,file));
+for(const file of ['main.cjs','account.cjs','tray.png','installer.nsh'])copyFileSync(join(root,'apps','desktop',file),join(stage,file));
 const icon=readFileSync(join(stage,'tray.png'));
 const icoHeader=Buffer.alloc(22);
 icoHeader.writeUInt16LE(1,2);

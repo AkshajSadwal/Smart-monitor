@@ -28,7 +28,7 @@ export const label=(key:string)=>({
   likedAuthor:'Previously liked author',favorite:'Favorite author',feedback:'Local feedback',
   silent:'Feed only',standard:'Standard',immediate:'Immediate',delayed:'Delayed popularity',
   disabled:'Desktop alerts off',unavailable:'Native delivery unavailable',submitted:'Submitted to desktop',unknown:'Delivery unknown',started:'Dispatch started',
-  simulation:'Simulation','official-api':'Official X API','website-session':'Authenticated website session',
+  simulation:'Simulation','website-session':'Authenticated website session',
 }[key]??key);
 export const timestamp=(value:number|null|undefined)=>{
   if (value===null||value===undefined) return '—';

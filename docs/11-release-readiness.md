@@ -1,97 +1,100 @@
-# Release readiness
-
-## Initial audit
-
-The existing architecture and profile remain the starting point. Official app-only collection already supports bounded recent search, lookup, persisted cursors and optional stream access. OAuth already uses PKCE and the OS vault, with incremental relationship sync. Local website automation has a fixture-tested interface and requires authorization. Hosted SSE already shares normalized topics and persists events. Ranking, alert decisions and SQLite remain local.
-
-This pass focuses on monetary spending limits and diagnostic probes, authorized hydration of ID-only events, explicit publication policies, hosted replay and credential expiry, desktop notification controls, and repeatable packaging across supported platforms.
-
-Live X, provider billing, redistribution approval, a public VM, and interactive platform acceptance require separate verification. Automated fixtures do not contact X.
+# Session architecture release readiness
 
 ## Implementation
 
-| Area | What changed | Why |
-|---|---|---|
-| Official X | Connection checks normalize one recent search, save a probe checkpoint, and distinguish missing, invalid, denied, rate-limited, out-of-budget, network, and invalid-response states. | A connectivity label alone does not verify auth, entitlement, or a usable payload. |
-| Spending | Daily request, resource, and USD reservations are checked atomically before reads. Unknown or zero rates or ceilings block dispatch. The estimate uses the operator's verified maximum resource price. Streaming has its own provider-hard-cap attestation. | A request count alone cannot bound credit charges. |
-| OAuth | Codes are single-use, a rejected code has a specific safe result, a renewable credential can refresh once on an ordinary 401, and rejected refresh clears relationship state. Account changes commit with updated vault state. | A failed or changed grant must not leave a previous account's signals active. |
-| Hosted | Two authenticated clients share equivalent topics. Event replay accepts Last-Event-ID, scopes expiry gaps to owned topics, renews connected leases, and distinguishes token expiry, denial and terms acknowledgement. The socket write buffer stays bounded. | Recovery must preserve multi-client ownership while avoiding duplicate delivery side effects. |
-| Content | Disabled, simulated, IDs, metadata and full-object modes apply before persisting and serving events. Richer live modes require a distinct operator attestation, shorter replay and a shared publication quota. Confirmed removals purge caches. | The frontend cannot enforce the upstream license boundary. |
-| Hydration and display | A bounded, opt-in local lookup can resolve hosted IDs without switching sources or sending credentials to the VM. Stale metadata is hidden. Optional official widgets are sandboxed and loaded after consent. | An identifier alone cannot establish keyword relevance or justify a notification. |
-| Notifications | Simulated desktop toasts require separate opt-in. Settings tests the actual desktop path and reports OS submission or unavailability. Notification clicks resolve to the local detail or original X link. | A test must distinguish the dispatch invocation from a banner the user can see. |
-| Release | Native Windows, both macOS architectures and Linux targets use Node 24 and rebuild SQLite for the packaged host. The GitHub Actions matrix is configured to check each target and attach packages to its run. | The native runtime and vault dependencies require platform-specific verification. |
+- **Local X Account.** The desktop opens a sandboxed window on X for manual sign-in and account verification. A separate browser partition keeps sign-in state on the device. Opted-in persistence requires an available OS-backed storage mechanism. The worker receives only status and persistence metadata. The window detects a first-party sign-in cookie and can clear its partition. Smart Monitor has no approved interface for verifying the username or running live search. Manual sharing of a selected permalink and excerpt remains available.
+- **Authorized session collector.** The fixture boundary stores opaque grants via the OS vault interface, validates bounded pages using the common post schema, and commits post data with its cursor. It holds on expired, denied or verification-required sessions. It respects provider retry deadlines and keeps the cursor across transient failure and same-account reconnect. Search results follow the ordinary matching, ranking, SQLite and notification path.
+- **Hosted Monitoring.** The bundled VM can start disabled or with simulated data. Public topics are approved on the desktop and aggregated on the VM. Authenticated delivery, per-client replay and lease, expiry and revocation behavior remain in place. A desktop client checks a server's reported provider before publishing topics. The VM retains field-level publication and deletion guards for authorized provider fixtures. The VM never receives the user's X session.
+- **Shared behavior.** Session pages and hosted frames use the same post validator. Topic normalization and source deactivation each have one implementation. Canonical IDs merge newly observed edit variants and keep alert decisions unique. Existing matching, ranking, rechecks, notification rules, watchlists, feedback, favorites, mascot and desktop tray remain the normal pipeline.
+- **Retirement.** The developer API-key collector, paid budgets, stream, polling lookup, hydration, OAuth routes and VM API provider were removed. There are no removed or added npm dependencies. The OS vault binding remains for hosted tokens and explicit legacy cleanup. Runtime routes and distribution use the same existing Fastify and Electron architecture.
 
-Use [manual tests A–H](10-manual-testing.md) and the [content policy](12-content-compliance.md) for acceptance and authorization requirements.
+## Profile compatibility
 
-## Security and profile review
+Migrations 1–4 retain their original checksums. Schema 5 pauses profiles using a retired collector and makes Simulated the selected test source. It retires incompatible scheduled jobs and API-only preferences. Historical provenance, scores, user settings, watchlists and notifications remain available. The Feed and Notifications source filters include **Earlier X collection**. Existing browser-profile or vault credentials are left alone during migration.
 
-- X credentials and VM client tokens remain in the OS vault. The VM independently encrypts the operator credential and stores only hashes of client tokens. Admin commands use the private worker environment or database. Public health and subscription status expose no administrator credential.
-- The desktop renderer has context isolation and sandboxing. Worker IPC bounds notice payloads and validates external post links. Fastify binds to loopback, validates Host and Origin, requires a local HttpOnly session and CSRF on writes, and separates privileged control calls. Hosted HTTPS pins an approved public DNS address, refuses redirects, and keeps normal certificate validation.
-- Live calls are outside ordinary tests. Their credentials come from the selected profile. The one-page X or OAuth probe requires a paused worker, two explicit flags, and a positive configured local budget. The VM acceptance probe is simulation-only and authenticates with a saved token.
-- Existing local schema 4, watchlists, collected posts, feedback, notification history, checkpoints, and credentials were preserved. Defaults for new preferences are read over the stored settings. Hosted tables are additive. A failed local schema upgrade retains its pre-migration backup.
-- The clean dependency audit flagged the old static-serving and notification packages and the Electron build chain. The lockfile upgrades the affected versions and scopes tooling overrides to the affected packages. The local tracked-file scan covered secret file extensions and common key and token signatures. It does not substitute for a full organizational credential inventory.
-- The public policy review verified that redistribution mode, widget display, storage, and removal each have distinct requirements. The implemented purge commands do not automatically propagate a takedown to disconnected devices or backup archives. Those copies need an operator process.
+A private copy created by the previous implementation passed the schema-4-to-5 upgrade and SQLite integrity and foreign-key checks. The historical feed and notification endpoints returned the preserved post and alert. The watchlist, author, score, feedback, favorite preference and unrelated alert cap survived. The original test database hash was unchanged.
 
-## Verification
+Use `npm run monitor -- cleanup-retired-credentials --confirm` for old desktop vault entries. Use `npm run hosted -- cleanup-retired-credentials --confirm` against the intended hosted database for old encrypted operator credentials. Both commands require an explicit operator action. The hosted cleanup was tested against a legacy table and preserved an unrelated secret row and the issued client token.
+
+## Verification on Windows x64
 
 | Check | Result |
-|---|---|
-| `npm ci` | Passed on Windows and in Ubuntu 24.04 under WSL2 from the patched lockfile. |
-| `npm audit` and `npm audit --omit=dev` | Passed with zero reported advisories. The staged Windows and Linux AppImage production dependency trees also reported zero. |
-| `npm run typecheck` and `npm run lint` | Passed on Windows and Linux. |
-| `npm test` | 34 passed on Windows and 34 passed on Linux. Includes both official fixtures through notification dispatch, verified website-session fixtures, and real loopback SSE across two clients, restart, expiry and revocation. |
-| `npm run build` and `npm run build:hosted` | Passed on Windows and Linux. |
-| `npm run test:hosted` | Passed on Windows and Linux. The final image, built from the hosted Dockerfile with Podman on B:, passed a two-client simulated SSE check in a network-isolated container. |
-| `npm run test:e2e` | Three Chromium tests passed on Windows and three on Linux. X widget JavaScript was intercepted by a fixture after explicit consent. |
-| `npm run test:desktop:dev` | Passed on Windows x64. Electron reported the test notification as submitted. |
-| `npm run desktop:package -- --win --x64 --publish never` and `npm run test:desktop:win` | Passed. The unsigned NSIS installer was rebuilt. The unpacked app passed background polling, history, tray activation and clean shutdown. Its worker hash matched the final bundle. Electron reported the test notification as submitted. |
-| `npm run desktop:package -- --linux appimage --x64 --publish never` and `npm run desktop:package -- --linux deb rpm --x64 --publish never` | Linux x64 AppImage, DEB and RPM built on Ubuntu 24.04 under WSL2. The isolated WSL filesystem on B: provided build space after the Windows system drive filled. The worker extracted from each package matched the final build. The DEB reported `amd64` and the RPM reported `x86_64`. |
-| `npm run test:desktop` with the Linux unpacked executable under D-Bus and Xvfb | Passed startup, dashboard, background monitoring, notification history, activation and shutdown. Native notification status was `unavailable` in the headless session. |
-| Native Intel and Apple Silicon macOS packaging and smoke | Not run. The workflow is configured for both architectures. |
-| Docker Compose and Caddy configuration | Validated locally. Public DNS, certificate issuance, and public proxy behavior remain external. |
-| GitHub Actions | Workflow parsed locally. Native Windows, Linux, Intel macOS and Apple Silicon jobs are configured. GitHub-hosted runs are pending. |
-| `verify-x` and `verify-oauth` | Fresh profile reported `NOT TESTED — CREDENTIALS REQUIRED`. No live connectivity was inferred. |
-| `verify-hosted` | The invocation without opt-in returned `NOT TESTED — EXPLICIT VM OPT-IN REQUIRED`. The external HTTPS probe was not run. |
+| --- | --- |
+| `npm ci` and `npm audit --audit-level=moderate` | Passed. Zero advisories reported. |
+| `npm run typecheck`, `npm run lint`, `npm test` | Passed. 23 tests, including real loopback clients, authorization boundaries, fixture ranking and notification dispatch, and SQLite upgrade. |
+| `npm run build`, `npm run build:hosted`, `npm run test:hosted` | Passed. The bundled server issued a test client token and delivered simulated SSE. An unsupported live configuration exited before opening a listener. |
+| `docker compose -f services/hosted-collector/compose.yaml config --quiet` | Passed locally. |
+| `npm run test:e2e` | Three Chromium tests passed. |
+| `npm run test:desktop:dev` | Passed. An intercepted first-party fixture proved sign-in detection, persistence across a full Electron restart and disconnect. The Electron native test reported submitted. |
+| `npm run desktop:package -- --win --x64 --publish never` | Passed. The unsigned installer is under `release/session/`, alongside the unpacked application. The previous release files were preserved. |
+| `npm run test:desktop:win` | Passed against `release/session/win-unpacked`. The worker SHA-256 matched the final bundle. The fixture verified sign-in detection, Windows restart persistence, and disconnect. Background monitoring, history, activation and shutdown passed. Electron reported the native test as submitted. |
+| `npm run test:performance` | Passed with 10,000 synthetic posts and 20 watchlists in in-memory SQLite on Windows x64 build 10.0.26300, Node 24.18.0, Intel Core 7 240H, 16 logical CPUs and about 16 GiB RAM. Feed p95 was 26 ms, scoring 287,584 evaluations/sec, ingestion 497 posts/sec, indexed query mean 0.008 ms, and 25 notification decisions 13.12 ms. Peak RSS was 377 MiB, with CPU use about one logical core. The two-client test separately replayed two retained events in 22 ms on this host. |
 
-The local Windows artifact is `release/Smart Monitor Setup 0.1.0.exe`. The Linux artifacts and their verified `SHA256SUMS-linux.txt` are in `release/linux-final/`. These local build outputs are ignored by Git.
+The signature and filename scans found no matching private keys, common token signatures, private SQLite files or browser sessions in tracked files. The produced worker and hosted bundles contained no retired X developer API endpoints or OAuth routes.
 
-## Performance
+## External gates
 
-The final in-process run used Windows x64 build 10.0.26300, Node 24.18.0, Intel Core 7 240H, 16 logical CPUs, and 16 GiB RAM. The database was in-memory SQLite with 10,000 synthetic posts and 20 watchlists. Packaging was also running on the host.
+- **Local live search and account signals are unsupported.** Live acceptance needs an expressly authorized X interface, a real search result, and separate checks for lookup and private relationship signals. Browser-cookie import has no authorized setup path. A real X sign-in and MFA were outside the fixture run.
+- **Hosted live collection is unavailable in the bundled server.** Live acceptance needs an authorized operator source, permission for the exact fields and recipients, a public HTTPS VM and two separately authenticated profiles. Simulation works locally.
+- Confirm visible OS notifications and click behavior on an interactive desktop. The Electron result confirms OS submission. Native Linux and macOS acceptance and signed installation are pending for this revision.
 
-| Measurement | Result |
-|---|---:|
-| Feed p95 over 30 requests | 68 ms |
-| Pure score evaluations | 67,536 per second |
-| Ingest and rank against 20 lists | 130 posts per second |
-| Indexed SQLite top-score query, mean of 1,000 | 0.033 ms |
-| Notification decisions for 25 jobs, excluding OS delivery | 27 ms |
-| Replay two retained SSE events after server reopen | 20 ms on Windows loopback |
-| Benchmark process peak RSS | 373 MiB |
-| Benchmark process CPU, relative to one logical core | 94% |
-
-The initial benchmark showed repeated watchlist loading in each notification decision. The decision batch now reuses the watchlists already read for the monitoring cycle. These are workload-specific values and exclude real X, public network, desktop rendering, and long-run performance.
-
-## External acceptance and release gates
-
-- Run permitted real recent search, lookup, OAuth grant and revoke, optional signal sync, and Filtered Stream when separately entitled. Test the provider's actual credits and budget enforcement in the X Developer Console.
-- Verify the operator license for the actual endpoint, display, fields, audience, cache and deletion procedure. Approve metadata, full-object delivery, and official widgets separately. Verify takedown propagation to receiving installations and backups.
-- Configure the public VM and TLS domain, issue per-installation tokens, then run manual Test E with two profiles. Keep website-session networking disabled unless X expressly approves a supported integration.
-- Accept the unsigned Windows test package locally and confirm actual toasts and clicks. Run both macOS builds and their GUI and Keychain acceptance on native hosts. Run Linux desktop visibility, login-launch, tray, and Secret Service checks in a user session. Sign and notarize release artifacts as appropriate before public distribution.
+[Manual acceptance](10-manual-testing.md) · [X policy](12-content-compliance.md)
 
 ## Changed files
 
-**Added**  
-`.github/workflows/verify.yml`, `docs/11-release-readiness.md`, `docs/12-content-compliance.md`, `services/hosted-collector/src/publication.ts`, `tests/hosted-multi.test.ts`, `tests/release.test.ts`.
+### Added
 
-**Modified**  
-`README.md`, `package.json`, `package-lock.json`, `docs/09-multi-source.md`, `docs/10-manual-testing.md`.
+- `apps/desktop/account.cjs`
+- `apps/service/credential-store.ts`
+- `tests/session.test.ts`
 
-`apps/desktop/main.cjs`, `apps/desktop/package.json`, `apps/service/api.ts`, `apps/service/cli.ts`, `apps/service/hosted-client.ts`, `apps/service/monitor.ts`, `apps/service/storage.ts`, `apps/service/x-api.ts`, `apps/web/components/preferences.tsx`, `apps/web/components/workspace.tsx`.
+### Modified
 
-`packages/collection-core/collector.ts`, `packages/collection-core/hosted.ts`, `packages/contracts/index.ts`, `services/hosted-collector/compose.yaml`, `services/hosted-collector/src/main.ts`, `services/hosted-collector/src/service.ts`.
+- `.dockerignore`
+- `.gitignore`
+- `README.md`
+- `apps/desktop/main.cjs`
+- `apps/desktop/package.json`
+- `apps/service/api.ts`
+- `apps/service/cli.ts`
+- `apps/service/desktop-ipc.ts`
+- `apps/service/hosted-client.ts`
+- `apps/service/monitor.ts`
+- `apps/service/storage.ts`
+- `apps/service/website-session.ts`
+- `apps/web/components/client.ts`
+- `apps/web/components/preferences.tsx`
+- `apps/web/components/workspace.tsx`
+- `docs/01-product.md`
+- `docs/02-architecture.md`
+- `docs/03-collection.md`
+- `docs/04-interface.md`
+- `docs/05-data-api.md`
+- `docs/06-roadmap.md`
+- `docs/08-verification.md`
+- `docs/09-multi-source.md`
+- `docs/10-manual-testing.md`
+- `docs/11-release-readiness.md`
+- `docs/12-content-compliance.md`
+- `packages/collection-core/collector.ts`
+- `packages/collection-core/hosted.ts`
+- `packages/contracts/index.ts`
+- `scripts/package-desktop.mjs`
+- `services/hosted-collector/compose.yaml`
+- `services/hosted-collector/src/main.ts`
+- `services/hosted-collector/src/provider.ts`
+- `services/hosted-collector/src/publication.ts`
+- `services/hosted-collector/src/service.ts`
+- `tests/browser/monitor.spec.ts`
+- `tests/completion.test.ts`
+- `tests/core.test.ts`
+- `tests/desktop-smoke.ts`
+- `tests/multi-source.test.ts`
+- `tests/release.test.ts`
 
-`tests/browser/monitor.spec.ts`, `tests/completion.test.ts`, `tests/desktop-smoke.ts`, `tests/multi-source.test.ts`, `tests/performance.ts`, `tests/x-api.test.ts`.
+### Removed
 
-**Removed**  
-No tracked files were removed in this release pass.
+- `apps/service/x-api.ts`
+- `docs/07-sol-handoff.md`
+- `packages/collection-core/x-protocol.ts`
+- `tests/x-api.test.ts`

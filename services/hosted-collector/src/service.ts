@@ -1,9 +1,9 @@
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
-import {createHash,createCipheriv,createDecipheriv,randomBytes,randomUUID} from 'node:crypto';
+import {createHash,randomBytes,randomUUID} from 'node:crypto';
 import {z} from 'zod';
 import {hostedStatus,topicsSchema,type Delivery} from '../../../packages/collection-core/hosted';
-import {officialProvider,simulation,UpstreamError,type Cursor,type HostedProvider} from './provider';
+import {simulation,UpstreamError,type Cursor,type HostedProvider} from './provider';
 import {publication} from './publication';
 
 const HOUR=3_600_000;
@@ -13,13 +13,9 @@ const integer=(v:unknown)=>z.coerce.number().int().nonnegative().safe().parse(v)
 type Topic={topic:string;checkpoint:string|null;due:number;state:string;attempt:number};
 type HostedOptions={
   mode:Delivery;clock?:()=>number;intervalMs?:number;retainMs?:number;topicLimit?:number;
-  transport?:typeof fetch;permission?:string;licenseConfirmed?:boolean;bearer?:string;dailyRequests?:number;dailyResources?:number;provider?:HostedProvider;
-  dailyUsdCents?:number;maxResourceUsdMicros?:number;
+  permission?:string;licenseConfirmed?:boolean;provider?:HostedProvider;
 };
-export const identityName=z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/);
-const secretName=(identity:string)=>identityName.parse(identity)==='default'?'x-bearer':'x-bearer:'+identity;
-const healthKey=(identity:string,key:string)=>identity==='default'?key:identity+':'+key;
-
+const healthKey=(identity:string,key:string)=>'session:'+identity+':'+key;
 export class HostedStore {
   readonly db:Database.Database;
   constructor(path:string) {
@@ -37,8 +33,6 @@ export class HostedStore {
       CREATE INDEX IF NOT EXISTS events_topic_id ON events(topic,id);
       CREATE INDEX IF NOT EXISTS membership_topic ON memberships(topic);
       CREATE TABLE IF NOT EXISTS audit(at INTEGER NOT NULL,action TEXT NOT NULL,object_id TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS secret(name TEXT PRIMARY KEY,cipher TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS usage(day TEXT PRIMARY KEY,requests INTEGER NOT NULL,resources INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS upstream(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS client_expiration(client TEXT PRIMARY KEY REFERENCES clients ON DELETE CASCADE,expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS client_agreement(client TEXT PRIMARY KEY REFERENCES clients ON DELETE CASCADE,accepted INTEGER NOT NULL);
@@ -110,66 +104,28 @@ export class HostedStore {
       this.db.prepare('INSERT INTO replay_floors SELECT topic,max(id) FROM events WHERE observed<? OR id<=? GROUP BY topic ON CONFLICT(topic) DO UPDATE SET through=max(through,excluded.through)')
         .run(now-retain,this.maxEvent()-20_000);
       this.db.prepare('DELETE FROM events WHERE observed<? OR id<=?').run(now-retain,this.maxEvent()-20_000);
-      this.db.prepare('DELETE FROM usage WHERE day<?').run(new Date(now-30*24*HOUR).toISOString().slice(0,10));
       this.db.prepare('DELETE FROM publication_usage WHERE day<?').run(new Date(now-30*24*HOUR).toISOString().slice(0,10));
       this.db.prepare('DELETE FROM audit WHERE at<?').run(now-90*24*HOUR);
     })();
   }
-  setBearer(raw:string,key:Buffer,now=Date.now(),identity='default'){
-    if(key.length!==32||!raw.trim()||raw.length>4096)throw new Error('Invalid server credential or encryption key');
-    const iv=randomBytes(12),cipher=createCipheriv('aes-256-gcm',key,iv);
-    const name=secretName(identity);
-    cipher.setAAD(Buffer.from('smart-monitor-hosted:'+name+':v1'));
-    const body=Buffer.concat([cipher.update(raw.trim(),'utf8'),cipher.final()]);
-    const sealed=Buffer.concat([iv,cipher.getAuthTag(),body]).toString('base64url');
+  removeRetiredCredentials(){
+    if(!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='secret'").get())return;
     this.db.transaction(()=>{
-      this.db.prepare('INSERT OR REPLACE INTO secret VALUES (?,?)').run(name,sealed);
-      this.db.prepare('INSERT INTO audit VALUES (?,?,?)').run(now,'credential-set',name);
-      this.db.prepare('DELETE FROM upstream WHERE key IN (?,?)').run(healthKey(identity,'hold'),healthKey(identity,'healthy'));
+      this.db.prepare("DELETE FROM secret WHERE name='x-bearer' OR name GLOB 'x-bearer:*'").run();
+      this.db.prepare('INSERT INTO audit VALUES (?,?,?)').run(Date.now(),'retired-credentials-removed','operator');
     })();
-  }
-  private bearerRow(identity:string){
-    return this.db.prepare('SELECT cipher FROM secret WHERE name=?').get(secretName(identity)) as {cipher:string}|undefined;
-  }
-  identityVersion(identity:string){const row=this.bearerRow(identity);return row?safeHash(row.cipher):null;}
-  identityStatus(identity:string,now=Date.now()){
-    const state=(name:string)=>(this.db.prepare('SELECT value FROM upstream WHERE key=?').get(healthKey(identity,name)) as {value:number}|undefined)?.value??0;
-    const configured=!!this.bearerRow(identity),retryAt=state('retry'),lastSuccess=state('healthy');
-    return {identity,provider:'official-api',configured,
-      status:!configured?'Credential required':state('hold')?'Upstream access or credit denied':retryAt>now?'Backoff':lastSuccess?'Verified':'Configured · unverified',
-      retryAt:retryAt>now?retryAt:null,lastSuccess:lastSuccess||null};
-  }
-  revokeBearer(identity:string,now=Date.now()){
-    const name=secretName(identity);
-    this.db.transaction(()=>{
-      this.db.prepare('DELETE FROM secret WHERE name=?').run(name);
-      this.db.prepare('DELETE FROM upstream WHERE key IN (?,?)').run(healthKey(identity,'hold'),healthKey(identity,'healthy'));
-      this.db.prepare('INSERT INTO audit VALUES (?,?,?)').run(now,'credential-revoked',name);
-    })();
-  }
-  getBearer(key:Buffer,identity='default'){
-    const row=this.bearerRow(identity);
-    if(!row||key.length!==32)throw new Error('Server X credential is not configured');
-    const data=Buffer.from(row.cipher,'base64url');
-    const decipher=createDecipheriv('aes-256-gcm',key,data.subarray(0,12));
-    decipher.setAAD(Buffer.from('smart-monitor-hosted:'+secretName(identity)+':v1'));
-    decipher.setAuthTag(data.subarray(12,28));
-    return Buffer.concat([decipher.update(data.subarray(28)),decipher.final()]).toString('utf8');
+    this.db.pragma('wal_checkpoint(TRUNCATE)');
   }
 }
-
 export function createHostedService(store:HostedStore,options:HostedOptions) {
   const mode=options.mode,clock=options.clock??Date.now,interval=options.intervalMs??300_000;
   const live=mode==='ids'||mode==='metadata'||mode==='approved-public';
   const retention=Math.min(options.retainMs??24*HOUR,mode==='metadata'||mode==='approved-public'?HOUR:Infinity),topicLimit=options.topicLimit??200;
-  const provider=options.provider??(mode==='simulated'?simulation(interval):
-    live&&options.bearer?officialProvider('default',()=>options.bearer!,options.transport):null);
-  if(live&&(!options.permission?.trim()||provider?.kind!=='official-api'||!options.dailyRequests||!options.dailyResources||
-    !options.dailyUsdCents||!options.maxResourceUsdMicros||((mode==='metadata'||mode==='approved-public')&&!options.licenseConfirmed)))
-    throw new Error('Live publication requires a permission reference, operator credential and positive budgets');
+  const provider=options.provider??(mode==='simulated'?simulation(interval):null);
+  if(live&&(!options.permission?.trim()||provider?.kind!=='website-session'||((mode==='metadata'||mode==='approved-public')&&!options.licenseConfirmed)))
+    throw new Error('Live collection is unavailable without an authorized session provider and publication permission.');
   if(mode==='simulated'&&provider?.kind!=='simulation')throw new Error('Simulated mode requires the simulation provider');
   const providerKind=provider?.kind??'disabled';
-  store.db.prepare("DELETE FROM events WHERE json_extract(payload,'$.delivery')<>?").run(mode);
   const app=Fastify({logger:false,bodyLimit:8192,forceCloseConnections:true});
   const clients=new WeakMap<object,string>();
   const rate=new Map<string,{count:number;ends:number}>();
@@ -236,7 +192,7 @@ export function createHostedService(store:HostedStore,options:HostedOptions) {
       if(!access||access.expired){stop();return;}
       store.db.prepare('UPDATE clients SET seen=? WHERE id=? AND seen<?').run(clock(),id,clock()-60_000);
       const rows=store.db.prepare(`SELECT e.id,e.payload FROM events e JOIN memberships m ON m.topic=e.topic
-        WHERE m.client=? AND e.id>? AND e.id>m.after_id ORDER BY e.id LIMIT 25`).all(id,cursor) as {id:number;payload:string}[];
+        WHERE m.client=? AND e.id>? AND e.id>m.after_id AND json_extract(e.payload,'$.delivery')=? ORDER BY e.id LIMIT 25`).all(id,cursor,mode) as {id:number;payload:string}[];
       const deliveryCount=live&&rows.length?reservePublication(clock(),rows.length):rows.length;
       if(deliveryCount<rows.length&&!limitReported){
         limitReported=true;
@@ -267,19 +223,6 @@ export function createHostedService(store:HostedStore,options:HostedOptions) {
       return allowed;
     })();
   }
-  function reserve(now:number) {
-    const date=new Date(now).toISOString().slice(0,10);
-    store.db.transaction(()=>{
-      const used=store.db.prepare('SELECT requests,resources FROM usage WHERE day=?').get(date) as {requests:number;resources:number}|undefined;
-      const key='cost:'+date;
-      const prior=readState(key)||(used?.resources??0)*(options.maxResourceUsdMicros??0);
-      const projected=prior+20*(options.maxResourceUsdMicros??0);
-      if((used?.requests??0)+1>(options.dailyRequests??0)||(used?.resources??0)+20>(options.dailyResources??0)||projected>(options.dailyUsdCents??0)*10_000)
-        throw new UpstreamError('Budget paused',Date.parse(date)+24*HOUR);
-      store.db.prepare('INSERT INTO usage VALUES (?,1,20) ON CONFLICT(day) DO UPDATE SET requests=requests+1,resources=resources+20').run(date);
-      writeState(key,projected);
-    })();
-  }
   function windowFor(topic:Topic,now:number) {
     const old=topic.checkpoint?JSON.parse(topic.checkpoint) as Cursor:null;
     const end=Math.floor((now-40_000)/1000)*1000;
@@ -305,7 +248,7 @@ export function createHostedService(store:HostedStore,options:HostedOptions) {
         const {cursor,gap}=windowFor(topic,now);
         const frozen=JSON.stringify(cursor);
         store.db.prepare('UPDATE topics SET checkpoint=? WHERE topic=?').run(frozen,topic.topic);
-        const result=await provider.collect(topic.topic,cursor,now,signal,()=>reserve(now));
+        const result=await provider.collect(topic.topic,cursor,now,signal);
         if(signal.aborted||provider.isCurrent?.()===false)return;
         store.db.transaction(()=>{
           if(!store.db.prepare('SELECT 1 FROM topics WHERE topic=? AND checkpoint=?').get(topic.topic,frozen))return;
@@ -329,8 +272,8 @@ export function createHostedService(store:HostedStore,options:HostedOptions) {
         const issue=error instanceof UpstreamError?error:new UpstreamError('Temporary upstream or response error');
         const due=issue.retry??now+Math.min(30*60_000,30_000*2**Math.min(topic.attempt,6));
         store.db.prepare('UPDATE topics SET state=?,due=?,attempt=attempt+1 WHERE topic=?').run(issue.message,due,topic.topic);
-        if(issue.hold){writeState(hold,1);store.db.prepare("UPDATE topics SET state='Upstream access or credit denied'").run();return;}
-        if(issue.message==='Rate limited'||issue.message==='Budget paused'){writeState(retry,due);store.db.prepare('UPDATE topics SET state=?').run(issue.message);return;}
+        if(issue.hold){writeState(hold,1);store.db.prepare('UPDATE topics SET state=?').run(issue.message);return;}
+        if(issue.message==='Rate limited'){writeState(retry,due);store.db.prepare('UPDATE topics SET state=?').run(issue.message);return;}
       }
     }
   }
