@@ -11,7 +11,6 @@ import {Store,hash} from './storage';
 import {Monitor} from './monitor';
 import {OSVault,removeRetiredCredentials} from './credential-store';
 import {WebsiteSession} from './website-session';
-import {HostedClient} from './hosted-client';
 import {desktopBridge} from './desktop-ipc';
 
 function profileHome() {
@@ -76,17 +75,12 @@ async function serve() {
   const desktop=desktopBridge();
   const website=new WebsiteSession(store,new OSVault(profile+':website'));
   const remembered=()=>store.value<{persistent:boolean}>('session:browser',{persistent:false}).persistent;
-  if(!remembered())store.run("DELETE FROM settings WHERE key='session:browser'");
-  const browserAccount=desktop?(action:import('./desktop-ipc').BrowserAction)=>desktop.account(action,remembered()):undefined;
-  const hosted:HostedClient=new HostedClient(store,new OSVault(profile+':hosted'),undefined,()=>{
-    monitor.wake();
-    monitor.signal('source.changed');
-  });
+  const browserAccount=desktop?(action:Parameters<typeof desktop.account>[0])=>desktop.account(action,remembered()):undefined;
   const monitor:Monitor=new Monitor(store,Date.now,desktop?.notify,(source,id,url)=>{
     if(desktop)desktop.send({type:'activate',source,id,url});
     else if(url) openBrowser(url);
     else void control<{url:string}>('bootstrap','POST',{post:id,source}).then(result=>openBrowser(result.url)).catch(()=>{});
-  },website,hosted);
+  },website);
   const file=fileURLToPath(import.meta.url);
   const root=process.env.MONITOR_WEB_ROOT??resolve(dirname(file),file.endsWith('.ts')?'../../apps/web/out':'../apps/web/out');
   const stop=()=>{
@@ -106,26 +100,25 @@ async function serve() {
     await monitor.stop();
     store.set('erase:pending',true);
     try {
-      if(browserAccount)await browserAccount({action:'disconnect'});
+      if(browserAccount)service.setBrowserAccount(await browserAccount({action:'disconnect'}));
       else if(remembered())throw new ApiError(409,'DESKTOP_REQUIRED','Open the desktop app to clear the saved X browser session.');
       await website.disconnect();
-      await removeRetiredCredentials(profile);
-      await hosted.disconnect();
+      await removeRetiredCredentials(profile,store);
     }
     catch(error) {monitor.start();throw error;}
     store.db.pragma('secure_delete = ON');
     store.db.transaction(()=>{
       for (const table of ['notifications','monitoring_jobs','scores','posts','watchlists','author_preferences','authors','account_relationships','usage_buckets','notification_limits','settings']) store.db.exec('DELETE FROM '+table);
       store.run("UPDATE data_sources SET active=0,configured=0,status='Retired',account_id=NULL,vault_ref=NULL,error_code=NULL,last_success_at=NULL,gap=NULL WHERE id='x'");
-      store.run("UPDATE data_sources SET active=0,configured=0,status=CASE id WHEN 'session' THEN 'Unsupported' ELSE 'Disconnected' END,account_id=NULL,vault_ref=NULL,error_code=NULL,last_success_at=NULL,gap=NULL WHERE id IN ('session','hosted')");
+      store.run("UPDATE data_sources SET active=0,configured=0,status='Unsupported',account_id=NULL,vault_ref=NULL,error_code=NULL,last_success_at=NULL,gap=NULL WHERE id='session'");
       store.run("UPDATE data_sources SET active=1,configured=1,status='Ready',error_code=NULL,last_success_at=NULL,gap=NULL WHERE id='mock'");
     })();
     store.db.exec('VACUUM');
     store.db.pragma('wal_checkpoint(TRUNCATE)');
     monitor.start();
   };
-  const service=createApi(monitor,{profile,webRoot:root,controlToken:token,stop,erase,browserAccount,website,hosted,
-    cleanupRetiredCredentials:()=>removeRetiredCredentials(profile),
+  const service=createApi(monitor,{profile,webRoot:root,controlToken:token,stop,erase,browserAccount,website,
+    cleanupRetiredCredentials:()=>removeRetiredCredentials(profile,store),
   });
   const fixed=process.env.MONITOR_PORT;
   if (fixed&&!/^\d{1,5}$/.test(fixed)) throw new ApiError(400,'INVALID_PORT','MONITOR_PORT must be an available loopback port.');
@@ -138,8 +131,13 @@ async function serve() {
   process.on('SIGTERM',stop);
   process.on('disconnect',stop);
   desktop?.onShutdown(stop);
+  desktop?.onBrowserAccount(service.setBrowserAccount);
   if(store.value('erase:pending',false)) await erase().catch(()=>{});
-  if(store.sources.some(s=>s.id==='hosted'&&!s.configured&&s.vault_ref)) await hosted.disconnect().catch(()=>{});
+  if(browserAccount&&remembered()){
+    void browserAccount({action:'check'}).then(service.setBrowserAccount,()=>{
+      service.setBrowserAccount({status:'Temporarily unavailable',persistent:true});
+    });
+  }
   monitor.start();
   desktop?.send({type:'ready'});
   console.log('Smart Monitor is ready.');
@@ -164,32 +162,6 @@ async function start() {
   }
   throw new Error(`The monitor did not become ready. Review ${log}.`);
 }
-async function hiddenInput(prompt:string):Promise<string> {
-  if (!process.stdin.isTTY) throw new Error('Enter the credential from an interactive terminal.');
-  process.stderr.write(prompt);
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
-  return new Promise((resolve,reject)=>{
-    let value='';
-    const finish=(cancelled:boolean)=>{
-      process.stdin.setRawMode(false);
-      process.stdin.off('data',read);
-      process.stdin.pause();
-      process.stderr.write('\n');
-      if(cancelled)reject(new Error('Credential entry cancelled.'));
-      else resolve(value.trim());
-    };
-    const read=(input:Buffer)=>{
-      for(const character of input.toString()) {
-        if(character==='\u0003')return finish(true);
-        if(character==='\r'||character==='\n')return finish(false);
-        if(character==='\b'||character==='\x7f')value=value.slice(0,-1);
-        else if(character>=' '&&value.length<4096)value+=character;
-      }
-    };
-    process.stdin.on('data',read);
-  });
-}
 async function main() {
   const [, ,command,option]=process.argv;
   if(command==='serve'||(command==='start'&&option==='--foreground')) {await serve();return;}
@@ -204,13 +176,7 @@ async function main() {
   if(command==='cleanup-retired-credentials'&&option==='--confirm'){
     await start();
     await control('cleanup-retired-credentials','POST',{confirm:true});
-    console.log('Retired X collection credentials removed from the local OS vault.');
-    return;
-  }
-  if(command==='hosted-credential'&&option==='set'){
-    await start();
-    await control('hosted-credential','POST',{value:await hiddenInput('Hosted client token: ')});
-    console.log('Hosted credential stored in the OS vault.');
+    console.log('Retired collection credentials removed from the local OS vault.');
     return;
   }
   if(command==='purge-x'&&/^\d{1,25}$/.test(option??'')&&process.argv[4]==='--confirm'){
@@ -218,15 +184,10 @@ async function main() {
     console.log('X post removed from this profile.');
     return;
   }
-  if(command==='verify-hosted'){
-    if(option!=='--confirm-vm'){console.log('NOT TESTED — EXPLICIT VM OPT-IN REQUIRED');return;}
-    console.log(JSON.stringify(await control('verify-hosted','POST',{confirm:true},18_000),null,2));
-    return;
-  }
   if(command==='status') {console.log(JSON.stringify(await control('status'),null,2));return;}
   if(command==='stop') {if(await alive())await control('stop','POST');return;}
   if(command==='pause'||command==='resume') {await control('pause','POST',{paused:command==='pause'});return;}
-  console.log('Usage: monitor start [--foreground] | open | status | pause | resume | stop | cleanup-retired-credentials --confirm | hosted-credential set | verify-hosted --confirm-vm | purge-x POST_ID --confirm');
+  console.log('Usage: monitor start [--foreground] | open | status | pause | resume | stop | cleanup-retired-credentials --confirm | purge-x POST_ID --confirm');
 }
 
 void main().catch(error=>{

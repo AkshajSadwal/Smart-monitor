@@ -12,7 +12,7 @@ One person, one local OS profile, one monitor. The product helps someone followi
 | [UI/UX specification](04-interface.md) | Screen behavior, glass theme, accessibility and inspected mascot manifest |
 | [Database and local API](05-data-api.md) | Entities, transactions, requests, errors and events |
 | [Implementation roadmap](06-roadmap.md) | Milestones, fixtures, acceptance tests and release gates |
-| [Source setup and deployment](09-multi-source.md) | Local sign-in, simulated collection and hosted SSE |
+| [Manual testing](10-manual-testing.md) | Desktop sign-in, local import and simulation |
 
 ## Users and smallest useful release
 
@@ -38,8 +38,8 @@ The first demonstrable product is the complete **simulated monitoring loop**. Fr
 | --- | --- |
 | 1. Browser or wrapper for MVP? | Local browser, same-origin static Next.js UI served by Fastify |
 | 2. Who runs after tab close? | A separately launched per-user Node service. The scheduler has no browser dependency |
-| 3. Safest live data path? | Local and hosted collection require approved read interfaces. Simulated is the default test source |
-| 4. Near-real-time? | Show hosted SSE delivery state and the last successful collection |
+| 3. Safest live data path? | Local X collection requires an approved session interface. Simulated is the default test source |
+| 4. Near-real-time? | Show local collection state and its last successful check |
 | 5. Personal signals? | Local favorites, mutes and feedback always work. Own follows and own liked-post authors require available API data and explicit opt-in. Unknown stays unknown |
 | 6. Without an authorized collection interface? | Entire simulated flow, including native alert attempts, scoring, rechecks, history, feedback and settings |
 | 7. Desktop notifications? | Backend dispatch to a native adapter from a logged-in desktop session. Durable in-app history covers denied permissions, unavailable OS actions and delivery uncertainty |

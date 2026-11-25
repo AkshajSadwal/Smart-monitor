@@ -86,7 +86,7 @@ test('small layout shows static mascot when WebGL is unavailable',async({page})=
   await expect(page.getByRole('link',{name:'Create watchlist'})).toBeVisible();
 });
 
-test('source controls enforce hosted consent and preserve the selected source after invalid input',async({page})=>{
+test('local source controls validate sharing and import posts from a JSON file',async({page})=>{
   await page.goto(cli('open','--print'));
   await page.getByRole('link',{name:'Watchlists',exact:true}).click();
   await page.getByRole('button',{name:'Use SQLite example'}).click();
@@ -94,17 +94,8 @@ test('source controls enforce hosted consent and preserve the selected source af
   await expect(page.getByRole('heading',{name:'SQLite releases'})).toBeVisible();
   await page.getByRole('link',{name:'Data sources',exact:true}).click();
   await expect(page.getByRole('heading',{name:'Local X Account',exact:true})).toBeVisible();
-  await expect(page.getByRole('heading',{name:'Hosted Monitoring',exact:true})).toBeVisible();
+  await expect(page.getByRole('heading',{name:'Hosted Monitoring',exact:true})).toHaveCount(0);
   await expect(page.getByRole('heading',{name:'Official X API',exact:true})).toHaveCount(0);
-  await page.getByRole('button',{name:'Configure server'}).click();
-  const modal=page.getByRole('dialog',{name:'Configure Hosted Monitoring'});
-  await modal.getByLabel('Public HTTPS server URL').fill('https://127.0.0.1');
-  await modal.getByRole('checkbox',{name:'sqlite',exact:true}).check();
-  await expect(modal.getByRole('button',{name:'Approve hosted configuration'})).toBeDisabled();
-  await modal.getByRole('checkbox',{name:/I consent/}).check();
-  await modal.getByRole('button',{name:'Approve hosted configuration'}).click();
-  await expect(modal.getByRole('alert')).toContainText('public HTTPS hostname');
-  await modal.getByRole('button',{name:'Close dialog'}).click();
   await expect(page.getByRole('heading',{name:'Simulated',exact:true})).toBeVisible();
   await expect(page.getByText('Automatic search requires an authorized X collection interface.',{exact:false})).toBeVisible();
   await expect(page.getByText('Available in the desktop app')).toBeVisible();
@@ -122,13 +113,32 @@ test('source controls enforce hosted consent and preserve the selected source af
   const post=page.getByRole('dialog',{name:'Post details'});
   await expect(post.getByText('A user-selected example about SQLite')).toBeVisible();
   await expect(post.getByText('User-shared excerpt')).toBeVisible();
-  await expect(post.getByText(/awaiting authorized post content/)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.getByRole('link',{name:'Data sources',exact:true}).click();
+  await page.getByRole('button',{name:'Import posts',exact:true}).click();
+  const imports=page.getByRole('dialog',{name:'Import X posts'});
+  const download=page.waitForEvent('download');
+  await imports.getByRole('link',{name:'Download JSON example'}).click();
+  expect((await download).suggestedFilename()).toBe('smart-monitor-posts.example.json');
+  await imports.getByLabel('Post JSON file').setInputFiles({
+    name:'posts.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify([
+      {url:'https://x.com/example/status/43',text:'SQLite release candidate from a JSON file',language:'en',metrics:{likes:200}},
+    ])),
+  });
+  await expect(imports.getByRole('button',{name:'Import selected file'})).toBeDisabled();
+  await imports.getByRole('checkbox',{name:/I choose to store these posts/}).check();
+  await imports.getByRole('button',{name:'Import selected file'}).click();
+  await expect(imports.getByRole('status')).toHaveText('1 saved');
+  await imports.getByRole('link',{name:'View manual posts'}).click();
+  await expect(page.getByRole('combobox',{name:'Source',exact:true})).toHaveValue('manual');
+  const imported=page.getByRole('button',{name:/SQLite release candidate from a JSON file/});
+  await expect(imported).toContainText('Manual import');
+  await expect(imported).toContainText('SQLite releases');
   let widgetRequests=0;
   await page.route('https://platform.twitter.com/widgets.js',route=>{
     widgetRequests++;
     return route.fulfill({contentType:'text/javascript',body:"document.body.insertAdjacentHTML('beforeend','<p>Fixture widget loaded</p>');"});
   });
-  await page.keyboard.press('Escape');
   await page.getByRole('link',{name:'Settings',exact:true}).click();
   await page.getByRole('checkbox',{name:/Offer official X embeds/}).check();
   await page.getByRole('button',{name:'Save settings'}).click();

@@ -117,11 +117,13 @@ test('session check classifies verification, restrictions and unexpected network
 
 test('desktop sign-in returns metadata only and leaves session collection unsupported',async()=>{
   const store=new Store(':memory:'),monitor=new Monitor(store);
+  store.set('session:browser',{status:'Connected',persistent:true,handle:'old_unbound'});
   let report:BrowserAccount={status:'Disconnected',persistent:false};
   const {api,setOrigin}=createApi(monitor,{profile:'fixture',controlToken:'fixture-control',stop:()=>{},erase:async()=>{},
     website:new WebsiteSession(store,credentials().vault),
     browserAccount:async action=>{
       if(action.action==='open')report={status:'Authentication required',persistent:action.remember};
+      if(action.action==='confirm')report={status:'Connected',persistent:true,handle:'fixture_user'};
       if(action.action==='disconnect')report={status:'Disconnected',persistent:false};
       return report;
     },
@@ -133,13 +135,21 @@ test('desktop sign-in returns metadata only and leaves session collection unsupp
     const headers={host,origin,cookie:String(session.headers['set-cookie']).split(';')[0],'x-monitor-csrf':session.json().csrf};
     const url='/api/v1/sources/session/browser';
     const send=(payload:unknown)=>api.inject({method:'POST',url,headers,payload:payload as object});
+    const restored=(await api.inject({url:'/api/v1/sources',headers})).json<SourceInfo[]>().find(source=>source.id==='session')!;
+    assert.equal(restored.account,null);
+    assert.equal(restored.browser?.status,'Check required');
+    assert.deepEqual(store.value('session:browser',null),{persistent:true});
     assert.equal((await api.inject({method:'POST',url,headers:{host,origin},payload:{action:'check'}})).statusCode,401);
     assert.equal((await send({action:'open',remember:true,cookies:'rejected'})).statusCode,400);
     assert.deepEqual((await send({action:'open',remember:true})).json(),{status:'Authentication required',persistent:true});
-    report={status:'Connected',persistent:true};
+    report={status:'Profile confirmation required',persistent:true};
     assert.deepEqual((await send({action:'check'})).json(),report);
+    assert.equal((await send({action:'confirm',handle:'user_input'})).statusCode,400);
+    assert.deepEqual((await send({action:'confirm'})).json(),{status:'Connected',persistent:true,handle:'fixture_user'});
     const sources=(await api.inject({url:'/api/v1/sources',headers})).json<SourceInfo[]>();
     assert.equal(sources.find(source=>source.id==='session')?.status,'Unsupported');
+    assert.equal(sources.find(source=>source.id==='session')?.account,'fixture_user');
+    assert.deepEqual(store.value('session:browser',null),{persistent:true});
     assert.equal((await api.inject({method:'PUT',url:'/api/v1/sources/session/active',headers})).statusCode,409);
     assert.deepEqual((await send({action:'disconnect'})).json(),{status:'Disconnected',persistent:false});
   } finally {await api.close();store.close();}

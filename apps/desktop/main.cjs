@@ -1,5 +1,5 @@
 const {app,BrowserWindow,Menu,Notification,Tray,dialog,nativeImage,shell}=require('electron');
-const {fork,spawn}=require('node:child_process');
+const {fork}=require('node:child_process');
 const {createRequire}=require('node:module');
 const {appendFileSync,existsSync,mkdirSync,readFileSync,statSync,writeFileSync,unlinkSync}=require('node:fs');
 const {join,resolve,dirname}=require('node:path');
@@ -23,7 +23,9 @@ let worker,window,tray,stopping=false,retry,attempt=0,quitInProgress=false;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const icon=()=>nativeImage.createFromPath(join(__dirname,'tray.png'));
 const allowX=url=>/^https:\/\/x\.com\/i\/web\/status\/\d{1,25}$/.test(url);
-const account=browserAccount();
+const account=browserAccount(join(shellData,'x-account-identity'),result=>{
+  if(worker?.connected)worker.send({type:'browser-account-state',result});
+});
 
 async function control(route,method='GET',body){
   const {origin,token}=JSON.parse(readFileSync(runtime,'utf8'));
@@ -74,7 +76,7 @@ async function ensureWorker(){
     if(message?.type==='notification'&&/^[\da-f-]{36}$/i.test(message.id)&&typeof message.title==='string'&&message.title.length<=128
       &&typeof message.message==='string'&&message.message.length<=500)showNotice(message,child);
     if(message?.type==='browser-account'&&/^[\da-f-]{36}$/i.test(message.id)&&
-      ['open','check','disconnect'].includes(message.action)&&typeof message.remembered==='boolean'&&
+      ['open','check','confirm','disconnect'].includes(message.action)&&typeof message.remembered==='boolean'&&
       (message.action!=='open'||typeof message.remember==='boolean')){
       const reply=result=>{if(child.connected)child.send({type:'browser-account-result',id:message.id,result});};
       void account(message).then(reply,()=>reply(null));
@@ -155,25 +157,6 @@ function setLogin(enabled){
   mkdirSync(dirname(startupPath),{recursive:true,mode:0o700});
   writeFileSync(startupPath,`[Desktop Entry]\nType=Application\nName=Smart Monitor\nExec="${exec}" --background\nTerminal=false\n`,{mode:0o600});
 }
-function openCredentialTerminal(){
-  const kind='hosted-credential';
-  if(!nodeBinary||!existsSync(nodeBinary))throw new Error('The local Node.js runtime is unavailable.');
-  const env={...process.env,MONITOR_PROFILE:profile};
-  const quote=value=>"'"+value.replaceAll("'","'\\''")+"'";
-  let child;
-  if(process.platform==='win32'){
-    const ps=value=>"'"+value.replaceAll("'","''")+"'";
-    const command=`$env:MONITOR_PROFILE=${ps(profile)}; & ${ps(nodeBinary)} ${ps(servicePath)} ${kind} set`;
-    const argument=Buffer.from(command,'utf16le').toString('base64');
-    const launch=`Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-NoExit','-EncodedCommand','${argument}') -WindowStyle Normal`;
-    child=spawn('powershell.exe',['-NoProfile','-EncodedCommand',Buffer.from(launch,'utf16le').toString('base64')],{env,stdio:'ignore',windowsHide:true});
-  } else if(process.platform==='darwin'){
-    const command=`MONITOR_PROFILE=${quote(profile)} ${quote(nodeBinary)} ${quote(servicePath)} ${kind} set`;
-    child=spawn('/usr/bin/osascript',['-e','on run argv','-e','tell application "Terminal" to do script (item 1 of argv)','-e','end run',command],{env,stdio:'ignore'});
-  } else child=spawn('x-terminal-emulator',['-e',nodeBinary,servicePath,kind,'set'],{env,stdio:'ignore'});
-  child.on('error',()=>report(new Error('Open a terminal and use the bundled service CLI to save the hosted client token.')));
-  child.unref();
-}
 async function stopWorker(){
   stopping=true;clearTimeout(retry);
   const child=worker;
@@ -201,12 +184,11 @@ async function refreshTray(){
   const status=await getStatus();
   if(!tray||stopping)return;
   tray.setContextMenu(Menu.buildFromTemplate([
-    {label:status?`${{mock:'Simulated',session:'Local X Account',hosted:'Hosted Monitoring'}[status.source]??'Collection'} · ${status.status}`:'Service starting',enabled:false},
+    {label:status?`${{mock:'Simulated',session:'Local X Account'}[status.source]??'Collection'} · ${status.status}`:'Service starting',enabled:false},
     {label:'Open Smart Monitor',click:()=>void openWindow().catch(report)},
     {label:status?.paused?'Resume monitoring':'Pause monitoring',enabled:!!status,click:()=>void control('pause','POST',{paused:!status?.paused}).then(refreshTray).catch(report)},
     {label:'Launch at login',type:'checkbox',checked:app.isPackaged&&loginEnabled(),enabled:app.isPackaged,
       click:item=>{try{setLogin(item.checked);}catch(error){report(error);}void refreshTray().catch(report);}},
-    {label:'Set hosted credential in terminal…',click:()=>{try{openCredentialTerminal();}catch(error){report(error);}}},
     ...(canUpdate()?[{label:'Check for updates',click:()=>void checkUpdates().catch(report)}]:[]),
     {type:'separator'},
     {label:'Quit Smart Monitor',click:()=>app.quit()},

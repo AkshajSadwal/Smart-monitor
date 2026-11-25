@@ -2,7 +2,7 @@ import {z} from 'zod';
 import {kindSchema,metricsSchema,namespaceSchema,type Candidate,type CollectorId,type Watchlist} from '../contracts/index';
 
 const id=z.string().regex(/^[\w-]{1,100}$/);
-export const xPostId=z.string().regex(/^\d{1,25}$/);
+const xPostId=z.string().regex(/^\d{1,25}$/);
 export const collectedPost=z.strictObject({
   namespace:namespaceSchema,id,canonicalId:id,text:z.string().max(100_000),
   authorId:z.string().max(100).nullable(),handle:z.string().max(30).nullable(),
@@ -17,10 +17,7 @@ export interface Collector {
   collect(lists:Watchlist[],now:number,signal:AbortSignal,commit:CommitPage):Promise<boolean>;
   lookup?(posts:Candidate[],now:number,signal:AbortSignal,attempts?:Map<string,number>):Promise<{posts:Candidate[];removed:string[]}>;
   refreshSignals?(now:number,signal:AbortSignal):Promise<void>;
-  stream?(lists:Watchlist[],signal:AbortSignal,commit:CommitPage):Promise<void>;
-  check?():Promise<unknown>;
   disconnect?():Promise<void>;
-  pause?():Promise<void>;
 }
 
 export class SourceManager {

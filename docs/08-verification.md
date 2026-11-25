@@ -1,6 +1,6 @@
 # Implementation and verification
 
-This is the initial release record. See the [current release verification](11-release-readiness.md) for session architecture results.
+This is the initial release record. See the [manual tests](10-manual-testing.md) for session architecture results.
 
 This record covers Windows x64, Node 24.18.0 and Chromium on the implementation host. The release targets also include macOS and graphical Linux. The simulated application runs without an X account.
 

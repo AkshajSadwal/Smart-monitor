@@ -1,5 +1,5 @@
 import {z} from 'zod';
-import {unknownMetrics,type Candidate,type Watchlist} from '../../packages/contracts/index';
+import {type Watchlist} from '../../packages/contracts/index';
 import {collectedPost,type Collector,type CommitPage} from '../../packages/collection-core/collector';
 import {lines,resetTime} from '../../packages/collection-core/http';
 import {ApiError} from './api';
@@ -145,17 +145,4 @@ export class WebsiteSession implements Collector {
       }
     });
   }
-}
-
-const sharedPostSchema=z.strictObject({url:z.url().max(600),excerpt:z.string().trim().min(1).max(5000),consent:z.literal(true)});
-export function selectedPost(input:unknown,now:number):Candidate {
-  const shared=sharedPostSchema.parse(input);
-  const url=new URL(shared.url);
-  if(url.protocol!=='https:'||!['x.com','www.x.com','twitter.com','www.twitter.com'].includes(url.hostname)||url.port||url.username||url.password)
-    throw new ApiError(400,'INVALID_POST_LINK','Paste an HTTPS link to the selected X post.');
-  const match=url.pathname.match(/^\/(?:i\/web|[A-Za-z0-9_]{1,30})\/status\/(\d{1,25})\/?$/);
-  if(!match)throw new ApiError(400,'INVALID_POST_LINK','Paste a direct X post permalink.');
-  return {namespace:'x',id:match[1],canonicalId:match[1],text:shared.excerpt,authorId:null,handle:null,displayName:null,language:null,
-    createdAt:null,kind:'unknown',metrics:unknownMetrics,observedAt:now,
-    observation:'user-shared:'+hash(shared.excerpt),collector:'session'};
 }

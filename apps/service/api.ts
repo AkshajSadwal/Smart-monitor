@@ -3,13 +3,12 @@ import staticFiles from '@fastify/static';
 import { existsSync } from 'node:fs';
 import { randomBytes,timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { collectorSchema,feedbackSchema,historyCollectorSchema,kindSchema,namespaceSchema,preferencesSchema,settingsSchema,unknownMetrics,watchlist,type BrowserAccount,type Candidate,type SourceInfo } from '../../packages/contracts/index';
-import {publicTopics} from '../../packages/collection-core/hosted';
+import { browserActionSchema,collectorSchema,feedbackSchema,historyCollectorSchema,kindSchema,namespaceSchema,preferencesSchema,settingsSchema,unknownMetrics,watchlist,type BrowserAccount,type BrowserAction,type Candidate,type SourceInfo } from '../../packages/contracts/index';
 import { localTime,scorePost } from './rank';
 import { hash,postSelect,type PostRow } from './storage';
 import type { Monitor } from './monitor';
-import type {HostedClient} from './hosted-client';
-import {selectedPost,type WebsiteSession} from './website-session';
+import type {WebsiteSession} from './website-session';
+import {selectedPost,importedPosts} from './manual-posts';
 
 const nonce=()=>randomBytes(32).toString('base64url');
 const sessionLife=2*60*60_000;
@@ -25,13 +24,23 @@ const idParam=z.strictObject({id:z.uuid()});
 
 export function createApi(monitor:Monitor,options:{
   webRoot?:string;profile:string;controlToken:string;stop:()=>void;
-  browserAccount?:(action:import('./desktop-ipc').BrowserAction)=>Promise<BrowserAccount>;
+  browserAccount?:(action:BrowserAction)=>Promise<BrowserAccount>;
   website?:WebsiteSession;
-  hosted?:HostedClient;
   cleanupRetiredCredentials?:()=>Promise<void>;
   erase:()=>Promise<void>;
 }) {
   const {store}=monitor;
+  const savedBrowser=store.value<{persistent:boolean}|null>('session:browser',null);
+  let browserState:BrowserAccount=savedBrowser?.persistent?{status:'Check required',persistent:true}:{status:'Disconnected',persistent:false};
+  // Only the desktop keeps the session-bound identity on disk.
+  if(savedBrowser)store.set('session:browser',{persistent:browserState.persistent});
+  function setBrowserAccount(next:BrowserAccount){
+    if(!store.db.open)return;
+    if(next.persistent!==browserState.persistent)store.set('session:browser',{persistent:next.persistent});
+    if(JSON.stringify(browserState)===JSON.stringify(next))return;
+    browserState=next;
+    monitor.signal('source.changed');
+  }
   const api=Fastify({logger:false,bodyLimit:65536,forceCloseConnections:true});
   let origin='';
   const bootstrap=new Map<string,number>();
@@ -109,18 +118,6 @@ export function createApi(monitor:Monitor,options:{
     if(!options.cleanupRetiredCredentials)throw missing();
     await options.cleanupRetiredCredentials();
     return {removed:true};
-  });
-  api.post('/api/control/hosted-credential',async req=>{
-    if(!options.hosted)throw missing();
-    const {value}=z.strictObject({value:z.string().length(43)}).parse(req.body);
-    monitor.invalidate();
-    await options.hosted.credential(value);
-    return {updated:true};
-  });
-  api.post('/api/control/verify-hosted',req=>{
-    z.strictObject({confirm:z.literal(true)}).parse(req.body);
-    if(!options.hosted)throw missing();
-    return options.hosted.verifySimulation();
   });
   api.post('/api/control/purge-x',req=>{
     const {id}=z.strictObject({id:z.string().regex(/^\d{1,25}$/)}).parse(req.body);
@@ -218,8 +215,8 @@ export function createApi(monitor:Monitor,options:{
     if (query.listId) {matchChecks.push('s.list_id=?');values.push(query.listId);}
     if (query.priority) {matchChecks.push("json_extract(s.explanation,'$.classification')=?");values.push(query.priority);}
     const matches=`EXISTS(SELECT 1 FROM scores s WHERE ${matchChecks.join(' AND ')})`;
-    const supplemental=collector==='hosted'?"p.namespace='x' AND p.text IS NULL":collector==='session'?
-      "EXISTS(SELECT 1 FROM post_display d WHERE d.namespace=p.namespace AND d.post_id=p.id AND json_type(d.metadata,'$.shared')='text')":null;
+    const supplemental=collector==='manual'?'1':collector==='hosted'?
+      "p.namespace='x' AND p.text IS NULL":null;
     checks.push(supplemental&&!query.listId&&!query.priority?`(${matches} OR (${supplemental}))`:matches);
     const sort=query.sort==='score'?'coalesce((SELECT max(score) FROM scores ss WHERE ss.namespace=p.namespace AND ss.post_id=p.id),-1)':'coalesce(p.created_at,p.first_seen_at)';
     if (query.cursor) {
@@ -233,18 +230,27 @@ export function createApi(monitor:Monitor,options:{
     const now=monitor.clock();
     return {items:page.map(row=>store.post(row,false,now)),cursor:rows.length>query.limit&&last?Buffer.from(JSON.stringify({key,value:last.sort_value,id:last.id})).toString('base64url'):null};
   });
+  function saveManualPosts(posts:Candidate[],kind:'user-shared'|'manual-import',now:number){
+    const lists=store.lists.filter(list=>list.enabled);
+    const ids=store.db.transaction(()=>posts.flatMap(post=>{
+      const id=monitor.ingest(post,lists,now,false,true);
+      if(!id)return [];
+      store.run("INSERT INTO post_display VALUES ('x',?,json_object('shared',?,'manual',?)) ON CONFLICT(namespace,post_id) DO UPDATE SET metadata=json_patch(post_display.metadata,excluded.metadata)",id,post.text,kind);
+      return [id];
+    }))();
+    if(ids.length)monitor.signal('posts.changed','overview.changed','source.changed');
+    return ids;
+  }
   api.post('/api/v1/posts/share',(req,res)=>{
-    const now=monitor.clock(),post=selectedPost(req.body,now);
-    if(store.blockedX(post.id))throw missing();
-    const row=store.db.transaction(()=>{
-      if(store.row('x',post.id))store.provenance(post);
-      else store.persist({...post,text:''},now);
-      store.run("INSERT INTO post_display VALUES ('x',?,?) ON CONFLICT(namespace,post_id) DO UPDATE SET metadata=json_set(post_display.metadata,'$.shared',json_extract(excluded.metadata,'$.shared'))",
-        post.id,JSON.stringify({shared:post.text}));
-      return store.row('x',post.id)!;
-    })();
-    monitor.signal('posts.changed');
-    return res.status(201).send(store.post(row,false,now));
+    const now=monitor.clock();
+    const [id]=saveManualPosts([selectedPost(req.body,now)],'user-shared',now);
+    if(!id)throw missing();
+    return res.status(201).send(store.post(store.row('x',id)!,false,now));
+  });
+  api.post('/api/v1/posts/import',(req,res)=>{
+    const now=monitor.clock(),posts=importedPosts(req.body,now);
+    const ids=saveManualPosts(posts,'manual-import',now);
+    return res.status(201).send({saved:ids.length,skipped:posts.length-ids.length});
   });
   api.get('/api/v1/embed/x/:id',(req,res)=>{
     const {id}=z.object({id:z.string().regex(/^\d{1,25}$/)}).parse(req.params);
@@ -350,34 +356,29 @@ export function createApi(monitor:Monitor,options:{
   });
   api.get('/api/v1/sources',():SourceInfo[]=>{
     return store.sources.map(row=>{
-      const hosted=row.id==='hosted'?options.hosted?.diagnostics:undefined;
-      const browser=row.id==='session'?store.value<BrowserAccount>('session:browser',{status:'Disconnected',persistent:false}):undefined;
+      const browser=row.id==='session'?browserState:undefined;
       const session=row.id==='session'?options.website?.state:undefined;
+      const status=monitor.status;
+      const postCount=store.count(`SELECT count(*) n FROM post_sources s JOIN posts p ON p.namespace=s.namespace AND p.id=s.post_id
+        WHERE s.collector=? AND (?<>'session' OR (p.observation NOT LIKE 'user-shared:%' AND p.observation NOT LIKE 'manual:%'))`,row.id,row.id);
       return {
         id:row.id,active:!!row.active,configured:!!row.configured,status:session?.status??row.status,error:row.error_code,
-        lastSuccess:row.last_success_at,gap:row.gap,coverage:store.coverage(row.id),capabilities:[...(monitor.sources.get(row.id)?.capabilities??[])],
-        ...(browser?{browser:{...browser,available:!!options.browserAccount},account:session?.handle??null}:{}),
-        ...(row.id==='hosted'?{hosted,publicTopics:publicTopics(store.lists)}:{}),
+        lastSuccess:row.last_success_at,nextDue:row.active?status.nextDue:null,postCount,gap:row.gap,coverage:store.coverage(row.id),capabilities:[...(monitor.sources.get(row.id)?.capabilities??[])],
+        ...(browser?{browser:{...browser,available:!!options.browserAccount},account:session?.handle??(browser.status==='Connected'?browser.handle:null),manualPosts:store.count("SELECT count(*) n FROM post_sources WHERE collector='manual'")}:{}),
       };
     });
   });
   api.post('/api/v1/sources/session/browser',async req=>{
     if(!options.browserAccount)throw new ApiError(409,'DESKTOP_REQUIRED','Open the Smart Monitor desktop app to use the local X sign-in window.');
-    const action=z.discriminatedUnion('action',[
-      z.strictObject({action:z.literal('open'),remember:z.boolean()}),
-      z.strictObject({action:z.enum(['check','disconnect'])}),
-    ]).parse(req.body);
+    const action=browserActionSchema.parse(req.body);
     const result=await options.browserAccount(action);
-    store.set('session:browser',result);
-    monitor.signal('source.changed');
+    setBrowserAccount(result);
     return result;
   });
   api.put('/api/v1/sources/:id/active',async req=>{
     const {id}=choice.parse(req.params);
     if (id===store.active.id) return monitor.status;
     if(!store.sources.find(s=>s.id===id)?.configured||!monitor.sources.get(id))throw new ApiError(409,'SOURCE_NOT_READY','Configure and authorize this source before selecting it.');
-    if(id==='hosted'&&!options.hosted?.config?.consent)throw new ApiError(409,'CONSENT_REQUIRED','Approve the hosted server and selected topics first.');
-    const previous=monitor.sources.get(store.active.id);
     monitor.invalidate();
     store.db.transaction(()=>{
       store.run('UPDATE data_sources SET active=0 WHERE active=1');
@@ -385,16 +386,9 @@ export function createApi(monitor:Monitor,options:{
       store.run("DELETE FROM monitoring_jobs WHERE type='alert'");
       store.set(`next:${id}`,monitor.clock());
     })();
-    await previous?.pause?.();
     monitor.wake();
     monitor.signal('source.changed','posts.changed','overview.changed');
     return monitor.status;
-  });
-  api.post('/api/v1/sources/:id/check',async(req,res)=>{
-    const {id}=choice.parse(req.params);
-    if(id!=='hosted'||!options.hosted)throw missing();
-    await options.hosted.check();
-    return res.status(202).send(monitor.status);
   });
   api.post('/api/v1/sources/mock/replay',()=>{
     if(store.active.id!=='mock')throw new ApiError(409,'SOURCE_NOT_READY','Select the simulated source before replaying.');
@@ -415,13 +409,6 @@ export function createApi(monitor:Monitor,options:{
     await source.disconnect();
     monitor.signal('source.changed','overview.changed','posts.changed');
     return monitor.status;
-  });
-  api.put('/api/v1/sources/hosted/config',async req=>{
-    if(!options.hosted)throw missing();
-    monitor.invalidate();
-    const configured=await options.hosted.configure(req.body);
-    monitor.wake();
-    return configured;
   });
   api.post('/api/v1/data/erase-preview',req=>{
     const key=nonce();
@@ -458,5 +445,5 @@ export function createApi(monitor:Monitor,options:{
   });
   if (options.webRoot && existsSync(options.webRoot)) void api.register(staticFiles,{root:options.webRoot,index:['index.html']});
   else api.get('/',(_req,res)=>res.type('text/plain').send('Smart Monitor runs locally. Build the web app to open the dashboard.'));
-  return {api,setOrigin:(value:string)=>{origin=value;},clearSessions:()=>{sessions.clear();bootstrap.clear();}};
+  return {api,setBrowserAccount,setOrigin:(value:string)=>{origin=value;},clearSessions:()=>{sessions.clear();bootstrap.clear();}};
 }

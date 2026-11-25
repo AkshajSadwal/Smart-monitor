@@ -48,6 +48,9 @@ test('golden 65 to 83, unavailable signals, normalized score and feedback',()=>{
   const scores=scorePost({...p3,metrics:{...p3.metrics,likes:Math.round(Math.sqrt(501)-1)}},strict,defaults,{favorite:true}).result!;
   assert.equal(scores.score,85);
   assert.ok(scorePost(p1,basic,defaults,{feedback:1}).result!.score>first.score);
+  const personal=scorePost(p1,basic,defaults,{following:1,likedAuthor:1}).result!;
+  assert.ok(personal.signals.some(signal=>signal.key==='following'&&signal.value===1));
+  assert.ok(personal.signals.some(signal=>signal.key==='likedAuthor'&&signal.value===1));
   assert.equal(scorePost(p1,basic,defaults,{muted:true}).result,null);
   assert.equal(quietNow(Date.parse('2026-11-01T06:30:00Z'),{enabled:true,start:'22:00',end:'08:00',zone:'America/New_York'}),true);
 });
@@ -80,7 +83,7 @@ test('persisted pipeline, coalescing, delayed growth, restart, and deletion isol
     monitor=new Monitor(store,()=>clock,fake);
     await monitor.tick();
     assert.equal(store.count("SELECT count(*) n FROM notifications WHERE canonical_id='demo-01' AND dispatch_state='unknown'"),1);
-    assert.equal(store.count("SELECT count(*) n FROM schema_migrations"),5);
+    assert.equal(store.count("SELECT count(*) n FROM schema_migrations"),6);
     assert.equal(store.paused,false);
   } finally {if(store.db.open)store.close();rmSync(folder,{recursive:true,force:true});}
 });
@@ -154,15 +157,53 @@ test('a previous SQLite version upgrades in place and a newer version fails clos
     const previous=new Database(path);
     previous.exec(`DROP TABLE post_sources; DROP INDEX jobs_collector; DROP INDEX notifications_collector;
       ALTER TABLE monitoring_jobs DROP COLUMN collector; ALTER TABLE notifications DROP COLUMN collector;
-      DELETE FROM data_sources WHERE id IN ('session','hosted'); DROP INDEX canonical_history;
+      DELETE FROM data_sources WHERE id IN ('session','hosted','manual'); DROP INDEX canonical_history;
       DELETE FROM schema_migrations WHERE version>=4;`);
     previous.close();
     const upgraded=new Store(path,now);
     assert.equal(upgraded.lists[0].id,list.id);
-    assert.equal(upgraded.count('SELECT count(*) n FROM schema_migrations'),5);
+    assert.equal(upgraded.count('SELECT count(*) n FROM schema_migrations'),6);
     assert.equal(upgraded.post(upgraded.row('mock',sample.id)!).collector,'mock');
     upgraded.run("INSERT INTO schema_migrations VALUES (999,'future',0)");
     upgraded.close();
     assert.throws(()=>new Store(path,now),/Unsupported or modified database schema/);
+  } finally {rmSync(folder,{recursive:true,force:true});}
+});
+
+test('a schema 5 remote profile upgrades paused with saved posts, provenance and alerts',()=>{
+  const folder=mkdtempSync(join(process.cwd(),'.state-test-'));
+  const path=join(folder,'previous.sqlite');
+  try {
+    const before=new Store(path,now);
+    const sample=simulatedPage(0,now).posts[0];
+    const list=before.saveList(basic,now);
+    before.persist(sample,now);
+    before.set('paused',false);
+    before.set('hosted:config',{origin:'https://previous.example.com',topics:['sqlite']});
+    before.run("UPDATE data_sources SET active=0 WHERE id='mock'");
+    before.run("UPDATE data_sources SET active=1,configured=1 WHERE id='hosted'");
+    before.run("UPDATE post_sources SET collector='hosted' WHERE post_id=?",sample.id);
+    before.run("INSERT INTO notifications VALUES ('history','mock',?,?,?,'SQLite',?,'2026-01-12','immediate',90,'Saved match',?,'disabled','hosted')",
+      sample.canonicalId,sample.id,list.id,now,now);
+    before.schedule('remote-job','alert','mock',sample.id,now,{});
+    before.persist({...sample,namespace:'x',id:'42',canonicalId:'42',authorId:null,text:'',collector:'session'},now);
+    before.run("INSERT INTO post_display VALUES ('x','42',json_object('shared','Previous chosen excerpt'))");
+    before.run("DELETE FROM data_sources WHERE id='manual'");
+    before.run('DELETE FROM schema_migrations WHERE version=6');
+    before.close();
+    const upgraded=new Store(path,now);
+    assert.equal(upgraded.active.id,'mock');
+    assert.equal(upgraded.paused,true);
+    assert.deepEqual(upgraded.sources.map(source=>source.id),['mock','session']);
+    assert.equal(upgraded.value('hosted:config',null),null);
+    assert.equal(upgraded.value('retired:remote-credential-origin',null),'https://previous.example.com');
+    assert.equal(upgraded.count("SELECT count(*) n FROM monitoring_jobs WHERE id='remote-job'"),0);
+    assert.equal(upgraded.row('mock',sample.id)?.text,sample.text);
+    assert.deepEqual(upgraded.post(upgraded.row('mock',sample.id)!,true).provenance,['hosted']);
+    assert.deepEqual(upgraded.get("SELECT read_at,collector FROM notifications WHERE id='history'"),{read_at:now,collector:'hosted'});
+    assert.equal(upgraded.post(upgraded.row('x','42')!,true).text,'Previous chosen excerpt');
+    assert.ok(upgraded.post(upgraded.row('x','42')!,true).provenance?.includes('manual'));
+    assert.deepEqual(upgraded.db.pragma('foreign_key_check'),[]);
+    upgraded.close();
   } finally {rmSync(folder,{recursive:true,force:true});}
 });

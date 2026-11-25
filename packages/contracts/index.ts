@@ -65,16 +65,18 @@ export const unknownMetrics: Metrics = {likes:null,reposts:null,replies:null,vie
 export const kindSchema = z.enum(['original','reply','repost','quote','unknown']);
 export const namespaceSchema = z.enum(['mock','x']);
 export type Source = z.infer<typeof namespaceSchema>;
-export const collectorSchema = z.enum(['mock','session','hosted']);
+export const collectorSchema = z.enum(['mock','session']);
 export type CollectorId = z.infer<typeof collectorSchema>;
-export const historyCollectorSchema = z.enum(['mock','session','hosted','x']);
+export const historyCollectorSchema = z.enum(['mock','session','manual','hosted','x']);
 export type HistoryCollectorId = z.infer<typeof historyCollectorSchema>;
-export const collectorLabel:Record<HistoryCollectorId,string> = {mock:'Simulated',x:'Earlier X collection',session:'Local X Account',hosted:'Hosted Monitoring'};
+export const collectorLabel:Record<HistoryCollectorId,string> = {
+  mock:'Simulated',session:'Local X Account',manual:'Manual X imports',hosted:'Earlier remote collection',x:'Earlier X collection',
+};
 export type Candidate = {
   namespace: Source; id:string; canonicalId:string; text:string; authorId:string|null; handle:string|null;
   displayName:string|null; language:string|null; createdAt:number|null; kind:z.infer<typeof kindSchema>;
   metrics:Metrics; observedAt:number; observation:string;
-  collector?:CollectorId;
+  collector?:CollectorId|'manual';
 };
 export type Classification = 'silent'|'standard'|'immediate'|'delayed';
 export type Score = {
@@ -87,7 +89,7 @@ export type Match = Score & {listId:string;listName:string;revision:number;suppr
 export type Post = Omit<Candidate,'observation'|'text'|'collector'> & {
   text:string|null; originalUrl:string|null; firstSeenAt:number; simulated:boolean; matches:Match[];
   feedback:Feedback; preferences:Preferences; snapshots?:{collectedAt:number;metrics:Metrics}[];
-  preview?:'simulation'|'user-shared'|'metadata'|'unresolved'|'stale';
+  preview?:'simulation'|'user-shared'|'manual-import'|'metadata'|'unresolved'|'stale';
   collector?:HistoryCollectorId;
   provenance?:HistoryCollectorId[];
 };
@@ -105,17 +107,26 @@ export type CollectionCoverage = {
   lastAttempt:number|null; pages:number; posts:number; oldest:number|null; newest:number|null;
 };
 export type Overview = {today:number;priority:number;lists:number;unread:number;status:MonitorStatus};
-export const browserAccountSchema = z.strictObject({
-  status:z.enum(['Connected','Authentication required','Verification required','Session expired','Restricted','Rate limited','Temporarily unavailable','Disconnected']),
-  persistent:z.boolean(),
-});
+export const browserAccountSchema = z.discriminatedUnion('status',[
+  z.strictObject({status:z.literal('Connected'),persistent:z.boolean(),handle:z.string().regex(/^[a-z0-9_]{1,15}$/i)}),
+  z.strictObject({
+    status:z.enum(['Check required','Profile confirmation required','Authentication required','Verification required','Session expired',
+      'Restricted','Rate limited','Temporarily unavailable','Disconnected']),
+    persistent:z.boolean(),
+  }),
+]);
 export type BrowserAccount = z.infer<typeof browserAccountSchema>;
+export const browserActionSchema = z.discriminatedUnion('action',[
+  z.strictObject({action:z.literal('open'),remember:z.boolean()}),
+  z.strictObject({action:z.enum(['check','confirm','disconnect'])}),
+]);
+export type BrowserAction = z.infer<typeof browserActionSchema>;
 export type SourceInfo = {
   id:CollectorId; active:boolean; configured:boolean; status:string; capabilities:string[];
   error:string|null; lastSuccess:number|null; gap?:string|null;
+  nextDue:number|null; postCount:number;
   browser?:BrowserAccount&{available:boolean};
   account?:string|null;
   coverage?:CollectionCoverage;
-  publicTopics?:string[];
-  hosted?:{origin:string;topics:string[];approvedTopics:string[];latencyMs:number|null;lastReceived:number|null;delivery:string;provider?:'disabled'|'simulation'|'website-session';consent:boolean;liveTermsAccepted?:boolean};
+  manualPosts?:number;
 };

@@ -13,8 +13,6 @@ export class Monitor {
   private timer?:NodeJS.Timeout;
   private flight?:Promise<void>;
   private controller?:AbortController;
-  private streamController?:AbortController;
-  private streamFlight?:Promise<void>;
   readonly sources:SourceManager;
   private running=false;
   private lastCleanup=0;
@@ -37,7 +35,7 @@ export class Monitor {
     const source=this.store.active.id;
     const next=this.store.value(`next:${source}`,0);
     const job=this.store.get<{due:number|null}>('SELECT min(due_at) AS due FROM monitoring_jobs WHERE collector=?',source)?.due;
-    const poll=source==='hosted'||this.store.lists.some(l=>l.enabled) ? next : Infinity;
+    const poll=this.store.lists.some(l=>l.enabled)?next:Infinity;
     const due=this.store.paused?Infinity:Math.min(poll,job??Infinity);
     const timeout=Math.min(Math.max(100,due-this.clock()),60_000);
     this.timer=setTimeout(()=>void this.tick().finally(()=>this.wake()),timeout);
@@ -45,7 +43,6 @@ export class Monitor {
   }
   invalidate() {
     this.controller?.abort();
-    this.streamController?.abort();
     this.store.run('UPDATE data_sources SET generation=generation+1 WHERE active=1');
     this.wake();
   }
@@ -54,7 +51,6 @@ export class Monitor {
       this.store.set('paused',value);
       if (value) {
         this.store.run("DELETE FROM monitoring_jobs WHERE type='alert'");
-        void this.sources.get(this.store.active.id)?.pause?.().catch(()=>{});
       }
       else this.store.set(`next:${this.store.active.id}`,this.clock());
       this.invalidate();
@@ -66,8 +62,7 @@ export class Monitor {
     this.running=false;
     if (this.timer) clearTimeout(this.timer);
     this.controller?.abort();
-    this.streamController?.abort();
-    await Promise.all([this.flight,this.streamFlight]);
+    await this.flight;
   }
   tick() {
     if (this.flight) return this.flight;
@@ -88,7 +83,7 @@ export class Monitor {
     if (now-this.lastCleanup>=86_400_000) this.cleanup(now,settings);
     if (this.store.paused) return;
     const lists=this.store.lists.filter(l=>l.enabled);
-    if ((lists.length||source==='hosted') && collector && now>=this.store.value(`next:${source}`,0)) {
+    if (lists.length && collector && now>=this.store.value(`next:${source}`,0)) {
       const next=now+1000*settings.intervalSeconds;
       this.store.changeCoverage(source,{lastAttempt:now,pages:0,posts:0});
       const success=await collector.collect(lists,now,signal,this.commit(source,lists,signal));
@@ -103,12 +98,6 @@ export class Monitor {
       this.signal('posts.changed','overview.changed','source.changed');
     }
     if (signal.aborted) return;
-    if (collector?.stream && lists.length && this.running && !this.streamFlight) {
-      const controller=new AbortController();
-      this.streamController=controller;
-      this.streamFlight=collector.stream(lists,controller.signal,this.commit(source,lists,controller.signal))
-        .catch(()=>{}).finally(()=>{this.streamFlight=undefined;this.streamController=undefined;});
-    }
     await this.recheck(source,collector,lists,now,signal);
     if (signal.aborted) return;
     for (const job of this.store.jobs('alert',source,now)) {
@@ -124,7 +113,6 @@ export class Monitor {
       this.store.db.transaction(()=>{
         for (const post of posts) this.ingest({...post,collector:source},lists,now,false,historical);
         if(key)this.store.set(key,state);
-        if(source==='hosted'&&posts.length)this.store.set('hosted:last-received',now);
         if(posts.length||source==='mock'){
           const coverage=this.store.coverage(source);
           const times=posts.flatMap(post=>post.createdAt===null?[]:[post.createdAt]);
@@ -141,20 +129,24 @@ export class Monitor {
   }
   private success(source:CollectorId,now:number,next:number) {
     this.store.set(`next:${source}`,next);
-    this.store.run("UPDATE data_sources SET status=CASE WHEN status IN ('Streaming','Connected') THEN status ELSE 'Polling' END,last_success_at=?,error_code=NULL WHERE id=?",now,source);
+    this.store.run("UPDATE data_sources SET status=CASE WHEN status='Connected' THEN status ELSE 'Polling' END,last_success_at=?,error_code=NULL WHERE id=?",now,source);
   }
   ingest(post:Candidate,lists:Watchlist[],now:number,recheck:boolean,historical:boolean) {
     if(post.namespace==='x'){
-      if(this.store.blockedX(post.id))return;
+      if(this.store.blockedX(post.id)||this.store.blockedX(post.canonicalId))return;
       const existing=this.store.get<{id:string}>('SELECT id FROM posts WHERE namespace=? AND canonical_id=? ORDER BY first_seen_at,id LIMIT 1',post.namespace,post.canonicalId);
       if(existing)post={...post,id:existing.id};
+      if(post.collector==='manual'){
+        const saved=this.store.row('x',post.id);
+        if(saved?.text&&!saved.observation.startsWith('manual:')){
+          this.store.provenance(post);
+          return post.id;
+        }
+      }
     }
-    if(post.collector==='hosted'&&post.namespace==='x'&&!post.text&&this.store.row('x',post.id)){
-      this.store.provenance(post);
-      return;
-    }
-    if (!this.store.persist(post,now)) return;
-    this.rank(post.namespace,post.id,lists,now,recheck,historical,false);
+    if(this.store.persist(post,now)||post.collector==='manual')
+      this.rank(post.namespace,post.id,lists,now,recheck,historical,false);
+    return post.id;
   }
   rerank(namespace:Source,id:string,authorId:string|null,now=this.clock()) {
     const rows=authorId?this.store.all<{id:string}>('SELECT id FROM posts WHERE namespace=? AND author_id=?',namespace,authorId):[{id}];
@@ -187,11 +179,12 @@ export class Monitor {
       SELECT sum(CASE WHEN f.rating='irrelevant' THEN -1 WHEN f.rating='useful' OR f.favorite=1 THEN 1 ELSE 0 END) sum
       FROM feedback f JOIN posts p ON p.namespace=f.namespace AND p.id=f.post_id WHERE p.namespace=? AND p.author_id=?`,namespace,authorId)?.sum : null;
     const feedback=this.store.feedback(namespace,id);
-    const relation=(kind:string)=>this.store.get<{value:number}>(`
+    const imported=candidate.observation.startsWith('manual:');
+    const relation=(kind:string)=>imported?undefined:this.store.get<{value:number}>(`
       SELECT a.value FROM account_relationships a JOIN data_sources d ON d.id=a.source_id AND d.account_id=a.account_id
       WHERE a.source_id=? AND a.author_id=? AND a.kind=? AND a.expires_at>?`,
       namespace==='x'?'session':'mock',authorId,kind,now)?.value;
-    const relationship=storeFollowing(this.store,namespace,authorId,now);
+    const relationship=imported?undefined:storeFollowing(this.store,namespace,authorId,now);
     const authorLikes=namespace==='x'&&authorId&&candidate.metrics.likes!==null&&candidate.createdAt!==null?
       this.store.all<{likes:number}>(`SELECT json_extract(metrics_json,'$.likes') AS likes FROM posts
         WHERE namespace=? AND author_id=? AND canonical_id<>? AND json_type(metrics_json,'$.likes')='integer'

@@ -1,5 +1,5 @@
 import {ApiError} from './api';
-import {hash} from './storage';
+import {hash,type Store} from './storage';
 
 export interface Vault { get(key:string):Promise<string|null>; set(key:string,value:string):Promise<void>; remove(key:string):Promise<void> }
 export class OSVault implements Vault {
@@ -28,11 +28,16 @@ export class OSVault implements Vault {
 }
 
 
-export async function removeRetiredCredentials(profile:string) {
+export async function removeRetiredCredentials(profile:string,store:Store) {
   const original=new OSVault(profile);
   const local=new OSVault(profile+':local-account');
   await original.remove('bearer');
   await original.remove('oauth-refresh');
   await local.remove('access');
   await local.remove('oauth-refresh');
+  const origin=store.value<string|null>('retired:remote-credential-origin',null);
+  if(origin){
+    await new OSVault(profile+':hosted').remove('hosted-'+hash(origin).slice(0,24));
+    store.run("DELETE FROM settings WHERE key='retired:remote-credential-origin'");
+  }
 }

@@ -3,33 +3,35 @@
 import {Database,Radio} from 'lucide-react';
 import Link from 'next/link';
 import {useEffect,useState,type FormEvent} from 'react';
-import {collectorLabel,type CollectionCoverage,type MonitorStatus,type Settings,type Source,type SourceInfo} from '../../../packages/contracts/index';
+import {collectorLabel,type BrowserAction,type CollectionCoverage,type MonitorStatus,type Settings,type Source,type SourceInfo} from '../../../packages/contracts/index';
 import {label,request,timestamp} from './client';
 import {Mascot} from './mascot/mascot';
 import {Modal,type ProfileSettings,type Run} from './workspace';
 
 export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceInfo[];monitor:MonitorStatus;reduced:boolean;run:Run;busy:boolean}) {
-  const [hosted,setHosted]=useState<SourceInfo|null>(null),[share,setShare]=useState(false),[remember,setRemember]=useState(false);
+  const [importOpen,setImportOpen]=useState(false),[share,setShare]=useState(false),[remember,setRemember]=useState(false);
   const local=sources.find(source=>source.id==='session');
-  const remote=sources.find(source=>source.id==='hosted');
   const simulated=sources.find(source=>source.id==='mock');
-  const browserAction=(input:{action:'open';remember:boolean}|{action:'check'|'disconnect'},message?:string)=>
-    void run(()=>request('/sources/session/browser','POST',input),message);
+  const browserAction=(input:BrowserAction)=>void run(()=>request('/sources/session/browser','POST',input));
   const select=(source:SourceInfo)=>void run(()=>request(`/sources/${source.id}/active`,'PUT'),`Selected ${collectorLabel[source.id]}.`);
   return <div className="stack">
     <div className="grid two">
       {local&&<section className="panel form-stack">
         <div className="panel-heading"><div><h2>Local X Account</h2><p>Sign in directly on X in a separate desktop window.</p></div><span className="stat-icon"><Database size={18}/></span></div>
         <dl className="fields">
-          <div><dt>Browser sign-in</dt><dd>{local.browser?.available?local.browser.status:'Available in the desktop app'}</dd></div>
-          <div><dt>Username</dt><dd>{local.account?'@'+local.account:'Unverified'}</dd></div>
+          <div><dt>Browser sign-in</dt><dd>{local.browser?.available?(local.browser.status==='Connected'?'Confirmed by you':local.browser.status):'Available in the desktop app'}</dd></div>
+          <div><dt>Username</dt><dd>{local.account?'@'+local.account:'Awaiting confirmation'}</dd></div>
           <div><dt>Session collection</dt><dd>{local.status}</dd></div>
-          <div><dt>Last successful collection</dt><dd>{timestamp(local.lastSuccess)}</dd></div>
+          <SourceStats source={local}/>
+          <div><dt>Manually saved posts</dt><dd>{local.manualPosts??0}</dd></div>
         </dl>
         {local.status==='Unsupported'&&<p className="warning">Automatic search requires an authorized X collection interface. Signing in lets you browse X manually.</p>}
-        {local.browser?.status==='Connected'&&<p className="subtle">A local sign-in cookie is present. Confirm the account in the X window.</p>}
+        {local.browser?.available&&local.browser.status==='Check required'&&<p className="subtle">Checking the saved local session…</p>}
+        {local.browser?.status==='Profile confirmation required'&&<p>In the X window, choose <strong>Profile</strong>. Confirm below when your profile shows <strong>Edit profile</strong>.</p>}
+        {local.browser?.status==='Authentication required'&&<p className="subtle">Use an email code or password when X offers it. The embedded window cannot complete Sign in with Google.</p>}
         {local.browser?.status==='Verification required'&&<p className="warning">Complete verification directly in the X window.</p>}
         {local.browser?.status==='Rate limited'&&<p className="warning">X limited access. Follow the directions shown in the X window.</p>}
+        {local.browser?.status==='Restricted'&&<p className="warning">X denied access. Follow the directions shown in the X window.</p>}
         {local.browser?.status==='Temporarily unavailable'&&<p className="warning">Check your network and unlock your system credential store if you saved a session.</p>}
         {local.browser?.available&&<>
           {local.browser.persistent?<p className="subtle">This browser uses a saved session on this device.</p>:
@@ -37,56 +39,51 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
           <div className="actions">
             <button className="button primary" disabled={busy} onClick={()=>browserAction({action:'open',remember})}>{local.browser.status==='Disconnected'?'Open X sign-in':'Open X account window'}</button>
             <button className="button" disabled={busy} onClick={()=>browserAction({action:'check'})}>Check browser session</button>
-            <button className="button" disabled={busy||local.browser.status==='Disconnected'} onClick={()=>browserAction({action:'disconnect'},'Local X browser session cleared.')}>Disconnect browser</button>
+            {local.browser.status==='Profile confirmation required'&&
+              <button className="button" disabled={busy} onClick={()=>browserAction({action:'confirm'})}>Confirm my X profile</button>}
+            <button className="button" disabled={busy||local.browser.status==='Disconnected'} onClick={()=>browserAction({action:'disconnect'})}>Disconnect browser</button>
           </div>
         </>}
         <div className="actions">
           {local.configured&&<button className="button" disabled={busy||local.active} onClick={()=>select(local)}>{local.active?'Selected':'Use Local X Account'}</button>}
           <button className="button" disabled={busy} onClick={()=>setShare(true)}>Share selected X post</button>
+          <button className="button" disabled={busy} onClick={()=>setImportOpen(true)}>Import posts</button>
+          {!!local.manualPosts&&<Link className="button" href="/feed/?collector=manual">View manual posts</Link>}
         </div>
       </section>}
-      {remote&&<section className="panel form-stack">
-        <div className="panel-heading"><div><h2>Hosted Monitoring</h2><p>Receive updates from your server for public topics you approve.</p></div><span className="stat-icon"><Database size={18}/></span></div>
-        <dl className="fields">
-          <div><dt>Connection</dt><dd>{remote.status}</dd></div>
-          <div><dt>Client token</dt><dd>{remote.configured?'Saved locally':'Required'}</dd></div>
-          <div><dt>Server</dt><dd>{remote.hosted?.origin??'—'}</dd></div>
-          <div><dt>Subscribed topics</dt><dd>{remote.hosted?.topics.join(', ')||'—'}</dd></div>
-          <div><dt>Last received post</dt><dd>{timestamp(remote.hosted?.lastReceived??null)}</dd></div>
-          <div><dt>Delivery mode</dt><dd>{remote.hosted?.delivery??'Unavailable'}</dd></div>
-        </dl>
-        <p className="subtle">The bundled server supports simulated delivery. Live collection requires an authorized source and redistribution rights.</p>
-        {remote.error&&<p className="warning">{label(remote.error)}{remote.gap?' · '+remote.gap:''}</p>}
+      {simulated&&<section className="panel form-stack">
+        <div className="panel-heading"><div><h2>Simulated</h2><p>Test watchlists, ranking, and alerts with seeded example posts.</p></div><span className="stat-icon"><Radio size={18}/></span></div>
+        <dl className="fields"><SourceStats source={simulated}/></dl>
         <div className="actions">
-          <button className="button" disabled={busy} onClick={()=>setHosted(remote)}>Configure server</button>
-          <button className="button" disabled={busy||!remote.configured} onClick={()=>void run(()=>request('/sources/hosted/check','POST'),'Hosted connection checked.')}>Check connection</button>
-          <button className="button primary" disabled={busy||remote.active||!remote.configured} onClick={()=>select(remote)}>{remote.active?'Selected':'Use Hosted Monitoring'}</button>
-          {remote.hosted&&<button className="button" disabled={busy} onClick={()=>void run(()=>request('/sources/hosted/disconnect','POST'),'Hosted Monitoring disconnected.')}>Disconnect</button>}
+          <button className="button" disabled={busy||simulated.active} onClick={()=>select(simulated)}>{simulated.active?'Selected':'Use Simulated'}</button>
+          <button className="button" disabled={busy||!simulated.active} onClick={()=>void run(()=>request('/sources/mock/replay','POST'),'Simulation queued.')}>Replay simulation</button>
         </div>
       </section>}
     </div>
-    {simulated&&<section className="panel form-stack">
-      <div className="panel-heading"><div><h2>Simulated</h2><p>Test watchlists, ranking, and alerts with seeded example posts.</p></div><span className="stat-icon"><Radio size={18}/></span></div>
-      <div className="actions">
-        <button className="button" disabled={busy||simulated.active} onClick={()=>select(simulated)}>{simulated.active?'Selected':'Use Simulated'}</button>
-        <button className="button" disabled={busy||!simulated.active} onClick={()=>void run(()=>request('/sources/mock/replay','POST'),'Simulation queued.')}>Replay simulation</button>
-      </div>
-    </section>}
     <section className="panel form-stack">
       <div className="panel-heading"><div><h2>Monitoring</h2><p>{collectorLabel[monitor.source]} · {monitor.status}</p></div><Mascot mode={monitor.error?'ERROR':'IDLE'} reduced={reduced}/></div>
-      <dl className="fields"><div><dt>Next attempt</dt><dd>{timestamp(monitor.nextDue)}</dd></div><div><dt>Polling interval</dt><dd>{monitor.intervalSeconds} seconds</dd></div></dl>
+      {(monitor.error||monitor.gap)&&<p className="warning">{monitor.gap??monitor.error}</p>}
+      <dl className="fields"><div><dt>Polling interval</dt><dd>{monitor.intervalSeconds} seconds</dd></div></dl>
       <CoverageFields coverage={monitor.coverage}/>
     </section>
-    {hosted&&<HostedSetup source={hosted} busy={busy} close={()=>setHosted(null)} run={run}/>}
     {share&&<SharePost busy={busy} close={()=>setShare(false)} run={run}/>}
+    {importOpen&&<ImportPosts busy={busy} close={()=>setImportOpen(false)} run={run}/>}
   </div>;
+}
+
+function SourceStats({source}:{source:SourceInfo}) {
+  return <>
+    <div><dt>Last successful collection</dt><dd>{timestamp(source.lastSuccess)}</dd></div>
+    <div><dt>Next scheduled check</dt><dd>{source.nextDue===null?'Unscheduled':timestamp(source.nextDue)}</dd></div>
+    <div><dt>Collected posts</dt><dd>{source.postCount}</dd></div>
+  </>;
 }
 
 export function CoverageFields({coverage}:{coverage?:CollectionCoverage}) {
   if(!coverage)return null;
   return <dl className="fields">
     <div><dt>Last attempt</dt><dd>{timestamp(coverage.lastAttempt)}</dd></div>
-    <div><dt>Latest attempt</dt><dd>{coverage.posts} posts · {coverage.pages} pages or deliveries</dd></div>
+    <div><dt>Latest attempt</dt><dd>{coverage.posts} posts · {coverage.pages} pages</dd></div>
     <div><dt>Oldest covered</dt><dd>{timestamp(coverage.oldest)}</dd></div>
     <div><dt>Newest covered</dt><dd>{timestamp(coverage.newest)}</dd></div>
   </dl>;
@@ -95,48 +92,52 @@ export function CoverageFields({coverage}:{coverage?:CollectionCoverage}) {
 
 function SharePost({busy,close,run}:{busy:boolean;close:()=>void;run:Run}) {
   const [url,setUrl]=useState(''),[excerpt,setExcerpt]=useState(''),[consent,setConsent]=useState(false),[postId,setPostId]=useState('');
+  const [language,setLanguage]=useState('');
   return <Modal title="Share a selected X post" close={close}>
-    <p>From a post you’ve opened on X, copy the permalink and the text you choose to keep on this device.</p>
-    {postId?<Link className="button primary" href={`/feed/?post=${encodeURIComponent(postId)}&source=x`}>View saved post</Link>:
+    <p>Paste a permalink and excerpt to match it against your watchlists. Manual posts are saved on this device and never trigger alerts.</p>
+    {postId?<Link className="button primary" href={`/feed/?collector=manual&post=${encodeURIComponent(postId)}&source=x`}>View saved post</Link>:
       <form className="form-stack" onSubmit={e=>{e.preventDefault();void run(async()=>{
-        const post=await request<{id:string}>('/posts/share','POST',{url,excerpt,consent});
+        const post=await request<{id:string}>('/posts/share','POST',{url,excerpt,language:language.trim()||undefined,consent});
         setPostId(post.id);
       },'Selected post saved locally.');}}>
         <label>X post permalink<input type="url" required maxLength={600} value={url} onChange={e=>setUrl(e.target.value)}/></label>
         <label>Selected excerpt<textarea required maxLength={5000} value={excerpt} onChange={e=>setExcerpt(e.target.value)}/></label>
+        <label>Language code (optional)<input placeholder="en" maxLength={3} pattern="[A-Za-z]{2,3}" value={language} onChange={e=>setLanguage(e.target.value)}/></label>
         <label className="check"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/> I choose to store this excerpt locally.</label>
         <button className="button primary" disabled={busy||!consent}>Save selected post</button>
       </form>}
   </Modal>;
 }
 
-function HostedSetup({source,busy,close,run}:{source:SourceInfo;busy:boolean;close:()=>void;run:Run}) {
-  const [origin,setOrigin]=useState(source.hosted?.origin??''),[consent,setConsent]=useState(false);
-  const [liveTermsAccepted,setLiveTermsAccepted]=useState(!!source.hosted?.liveTermsAccepted);
-  const [topics,setTopics]=useState((source.hosted?.approvedTopics??[]).filter(topic=>source.publicTopics?.includes(topic)));
-  const [error,setError]=useState('');
-  return <Modal title="Configure Hosted Monitoring" close={close}>
-    <form className="form-stack" onSubmit={e=>{e.preventDefault();void run(async()=>{
-      setError('');
-      try{await request('/sources/hosted/config','PUT',{origin,topics,consent,liveTermsAccepted});close();}
-      catch(error){setError(error instanceof Error?error.message:'Hosted setup unavailable');}
+const examplePosts=encodeURIComponent(JSON.stringify([
+  {url:'https://x.com/i/web/status/1234',text:'SQLite release candidate',author:'example',language:'en',metrics:{likes:10}},
+],null,2));
+
+function ImportPosts({busy,close,run}:{busy:boolean;close:()=>void;run:Run}) {
+  const [file,setFile]=useState<File|null>(null),[consent,setConsent]=useState(false);
+  const [result,setResult]=useState<{saved:number;skipped:number}|null>(null);
+  return <Modal title="Import X posts" close={close}>
+    <p>Choose a JSON file with up to 50 posts and a maximum size of 60 KB. Imported posts are matched locally and never trigger alerts.</p>
+    <p><a href={`data:application/json;charset=utf-8,${examplePosts}`} download="smart-monitor-posts.example.json">Download JSON example</a></p>
+    <form className="form-stack" onSubmit={event=>{event.preventDefault();void run(async()=>{
+      if(!file||file.size>60*1024)throw new Error('Choose a JSON file under 60 KB.');
+      let posts:unknown;
+      try {posts=JSON.parse(await file.text());}
+      catch {throw new Error('The selected file must contain a valid JSON array.');}
+      setResult(await request('/posts/import','POST',{posts,consent}));
     });}}>
-      <label>Public HTTPS server URL<input type="url" required value={origin} onChange={e=>setOrigin(e.target.value)} placeholder="https://monitor.example.com"/></label>
-      <fieldset><legend>Public topics to send, up to 16</legend>
-        {!source.publicTopics?.length&&<p>Create an enabled watchlist with a public keyword or phrase first.</p>}
-        {source.publicTopics?.map(topic=><label className="check" key={topic}>
-          <input type="checkbox" checked={topics.includes(topic)} disabled={topics.length>=16&&!topics.includes(topic)}
-            onChange={e=>setTopics(e.target.checked?[...topics,topic]:topics.filter(value=>value!==topic))}/>{topic}
-        </label>)}
-      </fieldset>
-      <label className="check"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/> I consent to send these public topics to this server when Hosted Monitoring is active.</label>
-      <label className="check"><input type="checkbox" checked={liveTermsAccepted} onChange={e=>setLiveTermsAccepted(e.target.checked)}/> For live X delivery, I agree to the applicable X Terms of Service, Privacy Policy, Developer Agreement, and Developer Policy.</label>
-      <p>Enter the VM-issued token in the local terminal using <code>npm run monitor -- hosted-credential set</code>. In the desktop app, use the tray's hosted credential action.</p>
-      {error&&<p className="warning" role="alert">{error}</p>}
-      <button className="button primary" type="submit" disabled={!origin||!topics.length||!consent||busy}>Approve hosted configuration</button>
+      <label>Post JSON file<input type="file" accept=".json,application/json" required onChange={event=>{
+        setFile(event.target.files?.[0]??null);
+        setResult(null);
+      }}/></label>
+      <label className="check"><input type="checkbox" checked={consent} onChange={event=>setConsent(event.target.checked)}/> I choose to store these posts on this device.</label>
+      <button className="button primary" disabled={busy||!consent||!file}>Import selected file</button>
     </form>
+    {result&&<p role="status">{result.saved} saved{result.skipped? ` · ${result.skipped} skipped because they were removed`:''}</p>}
+    {!!result?.saved&&<Link className="button" href="/feed/?collector=manual">View manual posts</Link>}
   </Modal>;
 }
+
 type Preference = {namespace:Source;id:string;handle:string|null;muted:boolean;favorite:boolean};
 export function SettingsPage({settings,run,busy}:{settings:ProfileSettings;run:Run;busy:boolean}) {
   const [draft,setDraft]=useState(settings),[important,setImportant]=useState(settings.importantTerms.join(', '));

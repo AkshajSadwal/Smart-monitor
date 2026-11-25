@@ -53,7 +53,7 @@ Prefix /api/v1. JSON objects use camelCase. Return 201 for creation, 200 for rea
 | POST /notifications/test | Return platform support and delivery attempt result for a clearly marked test. Separate from production quotas |
 | GET /sources · PUT /sources/{id}/active | List source states/capabilities and select a configured source. Cancel jobs from the previous source generation |
 | POST /sources/session/browser | Open, check or disconnect the desktop X browser. Returns safe status and persistence metadata. |
-| PUT /sources/hosted/config · POST /sources/hosted/check · POST /sources/hosted/disconnect | Approve topics, check the VM or disconnect and clear its local token. |
+| POST /posts/share · POST /posts/import | Save user-selected records and score them through the local ranking path. They are historical inputs and never schedule alerts. |
 | GET, PATCH /settings | Versioned typed preferences including interval, caps, quiet hours, time zone, global important terms, weights, retention, motion and OS notification preference. Startup reports capability and requested/effective state |
 | GET /events | Authenticated same-origin SSE stream of committed invalidations |
 | POST /data/erase | Accept explicit confirmation and short-lived operation nonce issued by authenticated POST /data/erase-preview with affected counts; stop jobs, erase profile and vault, invalidate sessions. CLI status reports incomplete cleanup on error |

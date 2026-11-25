@@ -115,6 +115,22 @@ const migrations = [
   DELETE FROM monitoring_jobs WHERE collector IN ('x','session');
   CREATE INDEX canonical_history ON posts(namespace,canonical_id,first_seen_at,id);
   `,
+  `
+  INSERT INTO settings(key,value_json) SELECT 'paused','true'
+    WHERE EXISTS(SELECT 1 FROM data_sources WHERE id='hosted' AND active=1)
+    ON CONFLICT(key) DO UPDATE SET value_json='true',revision=revision+1;
+  UPDATE data_sources SET active=0,configured=0,generation=generation+1,status='Retired',vault_ref=NULL WHERE id='hosted';
+  UPDATE data_sources SET active=1 WHERE id='mock' AND NOT EXISTS(SELECT 1 FROM data_sources WHERE active=1);
+  DELETE FROM monitoring_jobs WHERE collector='hosted';
+  INSERT INTO settings(key,value_json) SELECT 'retired:remote-credential-origin',json_quote(json_extract(value_json,'$.origin'))
+    FROM settings WHERE key='hosted:config' AND json_type(value_json,'$.origin')='text';
+  DELETE FROM settings WHERE key GLOB 'hosted:*' OR key IN ('next:hosted','coverage:hosted');
+  INSERT INTO data_sources(id,active,configured,status) VALUES ('manual',0,0,'Manual imports');
+  INSERT INTO post_sources(namespace,post_id,collector,observed_at)
+    SELECT d.namespace,d.post_id,'manual',p.last_seen_at FROM post_display d
+    JOIN posts p ON p.namespace=d.namespace AND p.id=d.post_id
+    WHERE d.namespace='x' AND json_type(d.metadata,'$.shared')='text';
+  `,
 ];
 
 export const hash = (value:string) => createHash('sha256').update(value).digest('hex');
@@ -170,7 +186,7 @@ export class Store {
   set(key:string,value:unknown) {this.run('INSERT INTO settings VALUES (?,?,1) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,revision=revision+1',key,JSON.stringify(value));}
   get settings():Settings {return {...defaults,...this.value<Partial<Settings>>('preferences',{})};}
   get paused() {return this.value('paused',true);}
-  get sources() {return this.all<SourceRow>("SELECT * FROM data_sources WHERE id IN ('session','hosted','mock') ORDER BY id");}
+  get sources() {return this.all<SourceRow>("SELECT * FROM data_sources WHERE id IN ('session','mock') ORDER BY id");}
   get active() {return this.get<SourceRow>('SELECT * FROM data_sources WHERE active=1')!;}
   deactivate(id:Exclude<CollectorId,'mock'>) {
     if(this.run('UPDATE data_sources SET active=0 WHERE id=? AND active=1',id).changes){
@@ -215,13 +231,13 @@ export class Store {
     const p=this.candidate(row);
     const [source,id]=[p.namespace,p.id];
     const saved=source==='x'?this.get<{metadata:string}>("SELECT metadata FROM post_display WHERE namespace='x' AND post_id=?",id):undefined;
-    const display=saved?json<{shared?:string}>(saved.metadata):undefined;
+    const display=saved?json<{shared?:string;manual?:'user-shared'|'manual-import'}>(saved.metadata):undefined;
     const preview=display?.shared;
     const stale=source==='x'&&now!==undefined&&row.verified_at!==null&&row.verified_at<now-24*60*60_000;
     const provenance=this.all<{collector:HistoryCollectorId}>('SELECT collector FROM post_sources WHERE namespace=? AND post_id=? ORDER BY observed_at DESC,collector',source,id).map(value=>value.collector);
     return {namespace:source,id,canonicalId:p.canonicalId,text:source==='mock'?p.text:preview??null,
-      preview:source==='mock'?'simulation':preview?'user-shared':stale?'stale':p.text?'metadata':'unresolved',
-      authorId:p.authorId,handle:source==='mock'?p.handle:null,displayName:source==='mock'?p.displayName:null,
+      preview:source==='mock'?'simulation':preview?display?.manual??'user-shared':stale?'stale':p.text?'metadata':'unresolved',
+      authorId:p.authorId,handle:source==='mock'||preview?p.handle:null,displayName:source==='mock'?p.displayName:null,
       language:stale?null:p.language,createdAt:stale?null:p.createdAt,kind:stale?'unknown':p.kind,metrics:stale?unknownMetrics:p.metrics,observedAt:p.observedAt,
       simulated:source==='mock',firstSeenAt:row.first_seen_at,originalUrl:canonicalUrl(source,id),
       collector:provenance[0],...(detail?{provenance}:{}),
@@ -261,7 +277,7 @@ export class Store {
     this.run(`INSERT INTO posts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(namespace,id) DO UPDATE SET author_id=coalesce(excluded.author_id,author_id),text=coalesce(excluded.text,text),content_hash=coalesce(excluded.content_hash,content_hash),kind=CASE WHEN excluded.kind='unknown' THEN kind ELSE excluded.kind END,language=coalesce(excluded.language,language),created_at=coalesce(excluded.created_at,created_at),last_seen_at=excluded.last_seen_at,verified_at=excluded.verified_at,observation=excluded.observation,metrics_json=excluded.metrics_json
       WHERE excluded.last_seen_at>=last_seen_at`,
-      p.namespace,p.id,p.canonicalId,p.authorId,p.text||null,p.text?hash(normalize(p.text)):null,p.kind,p.language,p.createdAt,now,p.observedAt,p.namespace==='x'?now:null,p.observation,JSON.stringify(p.metrics));
+      p.namespace,p.id,p.canonicalId,p.authorId,p.text||null,p.text?hash(normalize(p.text)):null,p.kind,p.language,p.createdAt,now,p.observedAt,p.namespace==='x'&&p.collector!=='manual'?now:null,p.observation,JSON.stringify(p.metrics));
     this.run('INSERT INTO engagement_snapshots VALUES (?,?,?,?,?)',p.namespace,p.id,p.observation,p.observedAt,JSON.stringify(p.metrics));
     this.provenance(p);
     return this.row(p.namespace,p.id)?.observation===p.observation;

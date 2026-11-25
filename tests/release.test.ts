@@ -4,67 +4,11 @@ import {createApi} from '../apps/service/api';
 import {Monitor} from '../apps/service/monitor';
 import {Store} from '../apps/service/storage';
 import {defaults,unknownMetrics,watchlist,type Candidate} from '../packages/contracts/index';
-import {hostedEvent} from '../packages/collection-core/hosted';
-import {publication} from '../services/hosted-collector/src/publication';
-import {createHostedService,HostedStore} from '../services/hosted-collector/src/service';
 
 const now=Date.now();
 const rule=watchlist.parse({name:'OpenAI',terms:[{direction:'include',kind:'word',text:'OpenAI'}],standard:40,immediate:50});
 const candidate:Candidate={namespace:'x',id:'12345678',canonicalId:'12345678',createdAt:now-60_000,observedAt:now,observation:'fixture',
   text:'OpenAI public fixture',authorId:'77',handle:'fixture_account',displayName:'Fixture',language:'en',kind:'original',metrics:{...unknownMetrics,likes:20}};
-test('publication modes enforce their field boundaries and confirmed deletion prevents replay',async()=>{
-  assert.equal(publication('disabled','openai',candidate),null);
-  const ids=publication('ids','openai',candidate)!;
-  assert.equal(ids.resolution,'unresolved');
-  assert.equal(ids.post.text,'');
-  assert.deepEqual(ids.post.metrics,unknownMetrics);
-  assert.equal(ids.post.authorId,null);
-  assert.equal(ids.post.createdAt,null);
-  const metadata=publication('metadata','openai',candidate)!;
-  assert.equal(metadata.resolution,'unresolved');
-  assert.equal(metadata.post.createdAt,candidate.createdAt);
-  assert.equal(metadata.post.metrics.likes,20);
-  assert.equal(metadata.post.handle,null);
-  assert.equal(hostedEvent.safeParse({...metadata,post:candidate}).success,false);
-  assert.equal(publication('approved-public','openai',candidate)?.post.text,candidate.text);
-  assert.equal(publication('simulated','openai',{...candidate,namespace:'mock'})?.resolution,'resolved');
-  const store=new HostedStore(':memory:');
-  try{
-    const provider={kind:'website-session' as const,identity:'fixture',collect:async(_topic:string,cursor:import('../services/hosted-collector/src/provider').Cursor)=>({
-      cursor:{...cursor,done:true},posts:[candidate],
-    })};
-    const options={mode:'approved-public' as const,clock:()=>now,permission:'fixture-review-record',provider};
-    assert.throws(()=>createHostedService(store,{...options,provider:undefined}),/authorized session provider/);
-    assert.throws(()=>createHostedService(store,options),/publication permission/);
-    const server=createHostedService(store,{...options,licenseConfirmed:true});
-    const token=store.issue('fixture',now).token;
-    const headers={Authorization:'Bearer '+token},request={method:'PUT' as const,url:'/v1/subscriptions',headers};
-    try{
-      assert.equal((await server.app.inject({...request,payload:{topics:['openai']}})).statusCode,403);
-      assert.equal((await server.app.inject({...request,payload:{topics:['openai'],liveTermsAccepted:true}})).statusCode,200);
-      await server.tick();
-      assert.equal((store.db.prepare('SELECT count(*) n FROM events').get() as {n:number}).n,1);
-      store.purgePost(candidate.id,now);
-      assert.equal((store.db.prepare('SELECT count(*) n FROM events').get() as {n:number}).n,0);
-      assert.equal(store.isBlocked(candidate.id),true);
-    }finally{await server.close();}
-  }finally{store.db.close();}
-});
-
-test('explicit retired credential cleanup preserves unrelated hosted data',()=>{
-  const store=new HostedStore(':memory:');
-  try{
-    store.db.exec(`CREATE TABLE secret(name TEXT PRIMARY KEY,cipher TEXT NOT NULL);
-      INSERT INTO secret VALUES ('x-bearer','old'),('x-bearer:operator','old'),('unrelated','other');`);
-    const client=store.issue('Existing client',now);
-    assert.ok(store.db.prepare("SELECT 1 FROM secret WHERE name='x-bearer'").get());
-    store.removeRetiredCredentials();
-    store.removeRetiredCredentials();
-    assert.deepEqual(store.db.prepare('SELECT name FROM secret').all(),[{name:'unrelated'}]);
-    assert.equal(store.authenticate('Bearer '+client.token,now)?.id,client.id);
-  }finally{store.db.close();}
-});
-
 test('native simulated alerts require opt-in and an X notification click opens the canonical link',async()=>{
   const store=new Store(':memory:');
   let time=now;

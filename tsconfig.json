@@ -8,5 +8,5 @@
     "esModuleInterop": true,
     "noEmit": true
   },
-  "include": ["apps/service/**/*.ts", "packages/**/*.ts", "services/**/*.ts", "fixtures/**/*.ts", "tests/**/*.ts", "playwright.config.ts"]
+  "include": ["apps/service/**/*.ts", "packages/**/*.ts", "fixtures/**/*.ts", "tests/**/*.ts", "playwright.config.ts"]
 }

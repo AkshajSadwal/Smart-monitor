@@ -160,10 +160,10 @@ function PostRow({post,open}:{post:Post;open:Open}) {
   return <article className="post-row">
     <div className="avatar" aria-hidden="true">{author.split(/\s+/).slice(0,2).map(v=>v[0]).join('')}</div>
     <button className="post-body" onClick={()=>open(post)}>
-      <span className="post-meta"><strong>{author}</strong>{post.handle&&<span>@{post.handle}</span>}<span>{timestamp(post.createdAt??post.observedAt)}</span>{post.simulated&&<span className="chip mini">Simulated</span>}{post.preview==='user-shared'&&<span className="chip mini">User-shared excerpt</span>}</span>
+      <span className="post-meta"><strong>{author}</strong>{post.handle&&<span>@{post.handle}</span>}<span>{timestamp(post.createdAt??post.observedAt)}</span>{post.simulated&&<span className="chip mini">Simulated</span>}{post.preview==='user-shared'&&<span className="chip mini">User-shared excerpt</span>}{post.preview==='manual-import'&&<span className="chip mini">Manual import</span>}</span>
       <span className="post-copy">{post.text??(post.preview==='unresolved'?`Unresolved X post · ID ${post.id}`:post.preview==='stale'?'Cached X metadata expired':'Preview opens on X')}</span>
       {post.collector&&post.collector!=='mock'&&<span className="subtle">{collectorLabel[post.collector]}</span>}
-      <span className="post-reason">{match ? <><Target size={14}/> {match.listName}{post.matches.length>1?' +' + (post.matches.length-1):''} · {match.matched.join(', ')}</>:post.preview==='unresolved'||post.preview==='user-shared'?'Awaiting authorized content for matching':'No active match'}</span>
+      <span className="post-reason">{match ? <><Target size={14}/> {match.listName}{post.matches.length>1?' +' + (post.matches.length-1):''} · {match.matched.join(', ')}</>:post.preview==='unresolved'?'Awaiting authorized content for matching':'No active match'}</span>
     </button>
     {match&&<span className={`score ${match.classification}`} title={label(match.classification)}><strong>{match.score}</strong><small>score</small></span>}
   </article>;
@@ -177,6 +177,9 @@ function HistorySourceFilter({value,change}:{value:HistoryCollectorId|'';change:
 function Feed({source,lists,updates,open}:{source:CollectorId;lists:Watchlist[];updates:number;open:Open}) {
   const [filters,setFilters]=useState(blankFilters),[items,setItems]=useState<Post[]>([]),[cursor,setCursor]=useState<string|null>(null);
   const [sourceFilter,setSourceFilter]=useState<HistoryCollectorId|''>('');
+  useEffect(()=>{
+    if(new URLSearchParams(window.location.search).get('collector')==='manual')setSourceFilter('manual');
+  },[]);
   const [pending,setPending]=useState<PageData<Post>|null>(null),[error,setError]=useState(''),[generation,setGeneration]=useState(0);
   const selected=sourceFilter||source;
   const query=new URLSearchParams({collector:selected,...Object.fromEntries(Object.entries(filters).filter(([,v])=>v))}).toString();
@@ -294,8 +297,9 @@ function PostDetail({selection,embeds,onClose,run}:{selection:{source:Source;id:
     {post&&<>
       <div className="post-meta"><strong>{post.displayName??'X post'}</strong>{post.handle&&<span>@{post.handle}</span>}{post.simulated&&<span className="chip">Simulated</span>}</div>
       {post.preview==='user-shared'&&<p className="subtle">User-shared excerpt</p>}
+      {post.preview==='manual-import'&&<p className="subtle">Manual import</p>}
       <p>{post.text??'Open the original on X to read this post.'}</p>
-      {(post.preview==='unresolved'||post.preview==='user-shared')&&!post.matches.length&&<p className="subtle">The monitor is awaiting authorized post content before evaluating watchlist rules.</p>}
+      {post.preview==='unresolved'&&!post.matches.length&&<p className="subtle">The monitor is awaiting authorized post content before evaluating watchlist rules.</p>}
       {post.preview==='stale'&&<p className="subtle">Cached X metadata has expired. Open the original for the current post.</p>}
       <p className="subtle">Created {timestamp(post.createdAt)} · Collected {timestamp(post.observedAt)} · {post.kind}</p>
       {!!post.provenance?.length&&<p className="subtle">Sources · {post.provenance.map(id=>collectorLabel[id]).join(', ')}</p>}

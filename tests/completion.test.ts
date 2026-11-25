@@ -10,9 +10,9 @@ const now=Date.parse('2026-11-20T12:00:00Z');
 const rule=watchlist.parse({name:'SQLite',terms:[{direction:'include',kind:'word',text:'SQLite'}]});
 const fixture:Candidate={namespace:'x',id:'42',canonicalId:'42',text:'SQLite release',createdAt:now-60_000,observedAt:now,
   authorId:'9',displayName:'Fixture',handle:'example',language:'en',kind:'original',observation:'initial',metrics:{...unknownMetrics,likes:2}};
-test('protected local share, source capabilities, ID-only filtering and immediate score changes',async()=>{
+test('manual shares and imports use local ranking without scheduling alerts',async()=>{
   const store=new Store(':memory:'),monitor=new Monitor(store,()=>now);
-  store.saveList(rule,now);
+  store.saveList({...rule,terms:[...rule.terms,{direction:'exclude',kind:'word',text:'hiring',important:false}]},now);
   const {api,setOrigin}=createApi(monitor,{profile:'test',controlToken:'fixture-control',stop:()=>{},erase:async()=>{}});
   const host='127.0.0.1:43123',origin='http://'+host;
   setOrigin(origin);
@@ -21,33 +21,60 @@ test('protected local share, source capabilities, ID-only filtering and immediat
     const session=await api.inject({method:'POST',url:'/api/v1/session',headers:{host,origin},payload:{nonce:new URL(boot.json().url).hash.slice(6)}});
     const headers={host,origin,cookie:String(session.headers['set-cookie']).split(';')[0],'x-monitor-csrf':session.json().csrf};
     const sources=(await api.inject({url:'/api/v1/sources',headers})).json<SourceInfo[]>();
-    assert.deepEqual(sources.map(source=>source.id).sort(),['hosted','mock','session']);
+    assert.deepEqual(sources.map(source=>source.id).sort(),['mock','session']);
     assert.equal(sources.find(source=>source.id==='session')?.status,'Unsupported');
     assert.equal(sources.find(source=>source.id==='session')?.browser?.available,false);
-    assert.equal((await api.inject({method:'PUT',url:'/api/v1/sources/x/active',headers})).statusCode,400);
+    assert.equal((await api.inject({method:'PUT',url:'/api/v1/sources/hosted/active',headers})).statusCode,400);
+    assert.equal((await api.inject({method:'PUT',url:'/api/v1/sources/hosted/config',headers})).statusCode,404);
     const share=(url:string,consent=true)=>api.inject({method:'POST',url:'/api/v1/posts/share',headers,payload:{url,excerpt:'Selected SQLite excerpt',consent}});
     assert.equal((await share('https://127.0.0.1/example/status/42')).statusCode,400);
     assert.equal((await share('https://x.com/example/status/42',false)).statusCode,400);
-    monitor.ingest({...fixture,text:'',collector:'hosted'},store.lists,now,false,false);
-    const unresolved=(await api.inject({url:'/api/v1/posts?collector=hosted',headers})).json().items[0];
-    assert.equal(unresolved.preview,'unresolved');
-    assert.equal(unresolved.matches.length,0);
     const shared=await share('https://x.com/example/status/42');
     assert.equal(shared.statusCode,201);
     assert.equal(shared.json().preview,'user-shared');
-    assert.equal(shared.json().matches.length,0);
-    assert.equal((await api.inject({url:'/api/v1/posts?collector=session&q=Excerpt',headers})).json().items[0].id,'42');
-    assert.equal(store.row('x','42')?.text,null);
+    assert.equal(shared.json().matches.length,1);
+
+    const selected={url:'https://x.com/i/web/status/43',text:'SQLite release candidate',author:'sqlite_news',
+      createdAt:new Date(now-60_000).toISOString(),metrics:{likes:10}};
+    const excluded={url:'https://x.com/example/status/44',text:'SQLite hiring notice'};
+    const batch=(posts:unknown[],consent=true)=>api.inject({method:'POST',url:'/api/v1/posts/import',headers,payload:{posts,consent}});
+    assert.equal((await batch([selected],false)).statusCode,400);
+    assert.equal((await batch([selected,{...excluded,url:'https://example.com/status/44'}])).statusCode,400);
+    assert.equal(store.row('x','43'),undefined);
+    assert.equal((await batch([selected,selected])).statusCode,400);
+    assert.deepEqual((await batch([selected,excluded])).json(),{saved:2,skipped:0});
+    await batch([selected]);
+    assert.equal(store.count("SELECT count(*) n FROM engagement_snapshots WHERE post_id='43'"),1);
+    const imported=(await api.inject({url:'/api/v1/posts/x/43',headers})).json();
+    assert.equal(imported.preview,'manual-import');
+    assert.equal(imported.handle,'sqlite_news');
+    assert.equal(imported.metrics.likes,10);
+    assert.equal(imported.metrics.views,null);
+    assert.equal(imported.matches.length,1);
+    assert.ok(imported.matches[0].unavailable.includes('following'));
+    assert.equal(store.matches('x','44').length,0);
+    assert.deepEqual((await api.inject({url:'/api/v1/posts?collector=manual',headers})).json().items.map((post:{id:string})=>post.id).sort(),['42','43','44']);
+    assert.equal((await api.inject({url:'/api/v1/posts?collector=manual&q=Excerpt',headers})).json().items[0].id,'42');
+    const current=(await api.inject({url:'/api/v1/sources',headers})).json<SourceInfo[]>().find(source=>source.id==='session');
+    assert.equal(current?.postCount,0);
+    assert.equal(current?.manualPosts,3);
+
     monitor.ingest({...fixture,collector:'session',observation:'fixture'},store.lists,now,false,true);
+    await share('https://x.com/example/status/42');
+    assert.equal(store.row('x','42')?.text,fixture.text);
     const weightBefore=store.matches('x','42')[0].score;
     const patch=await api.inject({method:'PATCH',url:'/api/v1/settings',headers:{...headers,'if-match':'0'},
       payload:{weights:{...defaults.weights,term:100,popularity:0}}});
     assert.equal(patch.statusCode,200);
     assert.notEqual(store.matches('x','42')[0].score,weightBefore);
     const detail=(await api.inject({url:'/api/v1/posts/x/42',headers})).json();
-    assert.deepEqual(new Set(detail.provenance),new Set(['hosted','session']));
+    assert.deepEqual(new Set(detail.provenance),new Set(['manual','session']));
     assert.equal(detail.text,'Selected SQLite excerpt');
     assert.equal(store.count('SELECT count(*) n FROM notifications'),0);
+    assert.equal(store.count('SELECT count(*) n FROM monitoring_jobs'),0);
+    store.removeX('43');
+    assert.deepEqual((await batch([selected])).json(),{saved:0,skipped:1});
+    assert.equal(store.row('x','43'),undefined);
   }finally{await api.close();store.close();}
 });
 

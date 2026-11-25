@@ -46,8 +46,6 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
-      - run: npm run build:hosted
-      - run: npm run test:hosted
       - name: Install Chromium and Linux dependencies
         shell: bash
         if: runner.os == 'Linux'

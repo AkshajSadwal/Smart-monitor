@@ -1,9 +1,0 @@
-{$HOSTED_DOMAIN} {
-  header {
-    Strict-Transport-Security "max-age=31536000"
-    X-Content-Type-Options "nosniff"
-  }
-  reverse_proxy hosted:8787 {
-    flush_interval -1
-  }
-}

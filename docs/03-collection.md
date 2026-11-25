@@ -1,15 +1,23 @@
-# Data collection feasibility
+# Local collection and imports
 
-The session-based release has two production entry points and one test mode. [Setup and deployment](09-multi-source.md)
+**Local X Account** uses an isolated desktop X window for manual sign-in. Remembered sessions and confirmed handles stay on the device. **Simulated** provides test posts and engagement changes for exercising watchlists and alerts.
 
-| Mode | Available now | External requirement |
-| --- | --- | --- |
-| Local X Account | Manual sign-in and browsing in an isolated desktop window. Session detection and disconnect. Voluntary sharing of selected posts. | Automated reading needs a specifically approved interface, its documented contract, and a verified account and search. |
-| Hosted Monitoring | Authenticated simulation, approved topic aggregation, SSE and replay. | A separately administered authorized source and permission to distribute the chosen fields to recipients. |
-| Simulated | Repeatable local posts, engagement snapshots, delayed alerts, ranked feed and history. | No external service or credentials. |
+X's documented search requires developer API authentication. X prohibits scripting its website, and no approved interface that accepts the browser session has been configured. Browser-cookie import, automated search, pagination, following, and liked-author retrieval are unavailable. The twscrape source separates account handling, pagination, parsing and storage. Its website GraphQL operations do not establish permission for Smart Monitor to use them. [X Automation Rules](https://help.x.com/en/rules-and-policies/x-automation) · [X Search API](https://docs.x.com/x-api/posts/search-recent-posts) · [twscrape source](https://github.com/vladkens/twscrape/blob/main/twscrape/api.py)
 
-X's automation rules prohibit scripting the website. A browser sign-in establishes a website session within Electron, while collection needs separate permission. Undocumented GraphQL interfaces and browser-cookie import have no approved integration in this release. Email challenges and MFA are handled by the user on X. [X Automation Rules](https://help.x.com/en/rules-and-policies/x-automation)
+## Manual imports
 
-The reference project's separation of session setup, operation scheduling, pagination and response parsing informed the module boundaries. Its multi-account rotation and private endpoint behaviors are outside this release. [twscrape](https://github.com/vladkens/twscrape)
+Open **Data sources → Local X Account → Import posts**, or paste one permalink and excerpt with **Share selected X post**. The JSON importer accepts an array of up to 50 posts within 60 KB. Each needs `url` and `text`. Optional fields are `author`, `createdAt` with an ISO 8601 offset, `language`, and a `metrics` object with nonnegative integer `likes`, `reposts`, `replies`, and `views`. Omit unknown fields.
 
-Local session fixtures exercise a stored grant, rule delivery, cursor resumption, rate-limit deadlines, denied access and local ranking. An approved production provider would need to verify keyword and phrase search, hashtags, author restrictions, engagement lookup and account signals individually. Missing fields stay unknown. [X content policy and release gates](12-content-compliance.md)
+~~~json
+[
+  {
+    "url": "https://x.com/i/web/status/1234",
+    "text": "SQLite release candidate",
+    "author": "example",
+    "language": "en",
+    "metrics": { "likes": 10 }
+  }
+]
+~~~
+
+These are user-provided records. Use the JSON format above for import. Text, handles and counts come from the selected data. Enable your watchlists before importing, then select **View manual posts**. Reimport a post to apply current watchlists or record a changed metrics snapshot. Identical observations remain deduplicated. Manual posts never schedule alerts or automated metric refreshes. Following and liked-author signals are unknown for manual posts. Local favorites, mutes and feedback still apply.

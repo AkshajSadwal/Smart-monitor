@@ -1,9 +1,8 @@
 import {randomUUID} from 'node:crypto';
-import {browserAccountSchema,type BrowserAccount} from '../../packages/contracts/index';
+import {browserAccountSchema,type BrowserAccount,type BrowserAction} from '../../packages/contracts/index';
 import {ApiError} from './api';
 import type {Notify} from './notifier';
 
-export type BrowserAction={action:'open';remember:boolean}|{action:'check'|'disconnect'};
 type Message={type?:string;id?:string;result?:unknown};
 type Parent = {
   postMessage:(message:unknown)=>void;
@@ -19,8 +18,14 @@ export function desktopBridge() {
   const pending=new Map<string,{result:(state:'submitted'|'unavailable')=>void;click?:()=>void}>();
   const accountRequests=new Map<string,(result:unknown)=>void>();
   let onStop=()=>{};
+  let onAccount:((state:BrowserAccount)=>void)|undefined;
   transport.on('message',({data})=>{
     if(data?.type==='shutdown'){onStop();return;}
+    if(data?.type==='browser-account-state'){
+      const state=browserAccountSchema.safeParse(data.result);
+      if(state.success)onAccount?.(state.data);
+      return;
+    }
     if(!data?.id)return;
     if(data.type==='browser-account-result'){accountRequests.get(data.id)?.(data.result);return;}
     const request=pending.get(data.id);
@@ -54,5 +59,6 @@ export function desktopBridge() {
     try {transport.postMessage({type:'browser-account',id,...action,remembered});}
     catch {clearTimeout(timer);accountRequests.delete(id);reject(failed());}
   });
-  return {notify,account,onShutdown:(stop:()=>void)=>{onStop=stop;},send:(message:unknown)=>transport.postMessage(message)};
+  return {notify,account,onBrowserAccount:(listen:(state:BrowserAccount)=>void)=>{onAccount=listen;},
+    onShutdown:(stop:()=>void)=>{onStop=stop;},send:(message:unknown)=>transport.postMessage(message)};
 }
