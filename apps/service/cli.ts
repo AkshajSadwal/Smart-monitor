@@ -74,6 +74,13 @@ async function serve() {
   const token=random();
   const desktop=desktopBridge();
   const website=new WebsiteSession(store,new OSVault(profile+':website'));
+  // A previously configured driver must not leave an unsupported source running.
+  if(website.state.status==='Unsupported'&&store.sources.some(row=>row.id==='session'&&(row.active||row.configured))){
+    store.db.transaction(()=>{
+      store.deactivate('session');
+      store.run("UPDATE data_sources SET status='Unsupported',error_code=NULL WHERE id='session'");
+    })();
+  }
   const remembered=()=>store.value<{persistent:boolean}>('session:browser',{persistent:false}).persistent;
   const browserAccount=desktop?(action:Parameters<typeof desktop.account>[0])=>desktop.account(action,remembered()):undefined;
   const monitor:Monitor=new Monitor(store,Date.now,desktop?.notify,(source,id,url)=>{

@@ -22,10 +22,16 @@ export class Monitor {
   }
   get status():MonitorStatus {
     const row=this.store.active;
-    const due=this.store.value<number|null>(`next:${row.id}`,null);
-    return {paused:this.store.paused,source:row.id,status:this.store.paused?'Paused':row.status,
-      lastSuccess:row.last_success_at,nextDue:this.store.paused||due===Number.MAX_SAFE_INTEGER?null:due,
+    const collector=this.sources.get(row.id);
+    const due=this.pollDue(row.id);
+    const state=collector?.availabilityStatus??row.status;
+    return {paused:this.store.paused,source:row.id,status:this.store.paused?'Paused':state,
+      lastSuccess:row.last_success_at,nextDue:this.store.paused||!Number.isFinite(due)||due===Number.MAX_SAFE_INTEGER||!this.store.lists.some(l=>l.enabled)?null:due,
       error:row.error_code,gap:row.gap,intervalSeconds:this.store.settings.intervalSeconds,coverage:this.store.coverage(row.id)};
+  }
+  private pollDue(source:CollectorId) {
+    const collector=this.sources.get(source);
+    return collector?Math.max(this.store.value(`next:${source}`,0),collector.nextAllowedAt??0):Infinity;
   }
   signal(...names:string[]) { for (const name of names) this.events.emit('change',name); }
   start() { this.running=true;this.wake(); }
@@ -33,10 +39,12 @@ export class Monitor {
     if (this.timer) clearTimeout(this.timer);
     if (!this.running || this.flight) return;
     const source=this.store.active.id;
-    const next=this.store.value(`next:${source}`,0);
-    const job=this.store.get<{due:number|null}>('SELECT min(due_at) AS due FROM monitoring_jobs WHERE collector=?',source)?.due;
-    const poll=this.store.lists.some(l=>l.enabled)?next:Infinity;
-    const due=this.store.paused?Infinity:Math.min(poll,job??Infinity);
+    const collector=this.sources.get(source);
+    const alert=this.store.get<{due:number|null}>("SELECT min(due_at) AS due FROM monitoring_jobs WHERE collector=? AND type='alert'",source)?.due;
+    const recheck=this.store.get<{due:number|null}>("SELECT min(due_at) AS due FROM monitoring_jobs WHERE collector=? AND type='recheck'",source)?.due;
+    const poll=this.store.lists.some(l=>l.enabled)?this.pollDue(source):Infinity;
+    const lookup=collector?.lookup?Math.max(recheck??Infinity,collector.nextAllowedAt??0):Infinity;
+    const due=this.store.paused?Infinity:Math.min(poll,alert??Infinity,lookup);
     const timeout=Math.min(Math.max(100,due-this.clock()),60_000);
     this.timer=setTimeout(()=>void this.tick().finally(()=>this.wake()),timeout);
     this.timer.unref();
@@ -83,7 +91,7 @@ export class Monitor {
     if (now-this.lastCleanup>=86_400_000) this.cleanup(now,settings);
     if (this.store.paused) return;
     const lists=this.store.lists.filter(l=>l.enabled);
-    if (lists.length && collector && now>=this.store.value(`next:${source}`,0)) {
+    if (lists.length && collector && now>=this.pollDue(source)) {
       const next=now+1000*settings.intervalSeconds;
       this.store.changeCoverage(source,{lastAttempt:now,pages:0,posts:0});
       const success=await collector.collect(lists,now,signal,this.commit(source,lists,signal));
@@ -98,7 +106,7 @@ export class Monitor {
       this.signal('posts.changed','overview.changed','source.changed');
     }
     if (signal.aborted) return;
-    await this.recheck(source,collector,lists,now,signal);
+    if(now>=(collector?.nextAllowedAt??0))await this.recheck(source,collector,lists,now,signal);
     if (signal.aborted) return;
     for (const job of this.store.jobs('alert',source,now)) {
       if (signal.aborted || this.store.paused) break;

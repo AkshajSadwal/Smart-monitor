@@ -22,10 +22,13 @@ export function SourcesPage({sources,monitor,reduced,run,busy}:{sources:SourceIn
           <div><dt>Browser sign-in</dt><dd>{local.browser?.available?(local.browser.status==='Connected'?'Confirmed by you':local.browser.status):'Available in the desktop app'}</dd></div>
           <div><dt>Username</dt><dd>{local.account?'@'+local.account:'Awaiting confirmation'}</dd></div>
           <div><dt>Session collection</dt><dd>{local.status}</dd></div>
+          <div><dt>Monitoring state</dt><dd>{local.status==='Unsupported'?'Unavailable':!local.active?'Not selected':monitor.paused?'Paused':monitor.status}</dd></div>
+          <div><dt>Collection capabilities</dt><dd>{local.capabilities.length?local.capabilities.join(', '):'None available'}</dd></div>
           <SourceStats source={local}/>
           <div><dt>Manually saved posts</dt><dd>{local.manualPosts??0}</dd></div>
         </dl>
-        {local.status==='Unsupported'&&<p className="warning">Automatic search requires an authorized X collection interface. Signing in lets you browse X manually.</p>}
+        {local.status==='Unsupported'&&<p className="warning">Automatic search requires an authorized X collection interface. Browser sign-in alone does not grant collection access. No automatic X posts or alerts will be collected.</p>}
+        {local.error&&<p className="warning">Collection error: {local.error}</p>}
         {local.browser?.available&&local.browser.status==='Check required'&&<p className="subtle">Checking the saved local session…</p>}
         {local.browser?.status==='Profile confirmation required'&&<p>In the X window, choose <strong>Profile</strong>. Confirm below when your profile shows <strong>Edit profile</strong>.</p>}
         {local.browser?.status==='Authentication required'&&<p className="subtle">Use an email code or password when X offers it. The embedded window cannot complete Sign in with Google.</p>}

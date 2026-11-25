@@ -150,8 +150,79 @@ test('desktop sign-in returns metadata only and leaves session collection unsupp
     assert.equal(sources.find(source=>source.id==='session')?.status,'Unsupported');
     assert.equal(sources.find(source=>source.id==='session')?.account,'fixture_user');
     assert.deepEqual(store.value('session:browser',null),{persistent:true});
+    store.run("UPDATE data_sources SET configured=1 WHERE id='session'");
+    const stale=(await api.inject({url:'/api/v1/sources',headers})).json<SourceInfo[]>().find(source=>source.id==='session')!;
+    assert.equal(stale.configured,false);
     assert.equal((await api.inject({method:'PUT',url:'/api/v1/sources/session/active',headers})).statusCode,409);
     assert.deepEqual((await send({action:'disconnect'})).json(),{status:'Disconnected',persistent:false});
   } finally {await api.close();store.close();}
 });
 
+
+test('rate-limit deadline survives resume and rescheduling; expired cursors restart safely',async()=>{
+  const store=new Store(':memory:'),{vault}=credentials();
+  let time=initial;
+  const cursors:(string|null)[]=[];
+  const account=new WebsiteSession(store,vault,{
+    authorizationReference:'fixture-only',
+    authorizeInteractively:async()=>({handle:'fixture',opaqueGrant:'local-test',expiresAt:initial+3_600_000}),
+    async search(_grant,_lists,cursor){
+      cursors.push(cursor);
+      if(cursors.length===1)return response({items:[candidate],next:'expired-cursor'});
+      if(cursors.length===2)return response({},429,{'retry-after':'120'});
+      if(cursors.length===3)return response({},410);
+      return response({items:[candidate],next:null});
+    },
+  },()=>time);
+  try{
+    await account.connect(signal);
+    store.saveList(watchlist.parse({name:'SQLite',terms:[{kind:'word',text:'SQLite',direction:'include'}]}),time);
+    store.run("UPDATE data_sources SET active=0 WHERE id='mock'");
+    store.run("UPDATE data_sources SET active=1 WHERE id='session'");
+    const app=new Monitor(store,()=>time,async()=> 'submitted',undefined,account);
+    app.pause(false);
+    await app.tick();
+    time+=300_000;
+    await app.tick();
+    const deadline=time+120_000;
+    app.pause(true);
+    app.pause(false);
+    store.set('next:session',time); // watchlist or interval edit
+    assert.equal(app.status.nextDue,deadline);
+    await app.tick();
+    assert.equal(cursors.length,2);
+    time=deadline;
+    await app.tick();
+    assert.equal(account.state.status,'Temporarily unavailable');
+    time+=60_000;
+    await app.tick();
+    assert.deepEqual(cursors,[null,'expired-cursor','expired-cursor',null]);
+    assert.equal(store.count('SELECT count(*) n FROM posts'),1);
+    time=initial+3_600_000;
+    assert.equal(app.status.status,'Session expired');
+    assert.equal(app.status.nextDue,null);
+    await app.tick();
+    assert.equal(cursors.length,4);
+  }finally{store.close();}
+});
+
+test('aborting a stalled session response cannot commit posts or a cursor',async()=>{
+  const store=new Store(':memory:'),{vault}=credentials();
+  const controller=new AbortController();
+  let entered!:()=>void;
+  const started=new Promise<void>(resolve=>{entered=resolve;});
+  const account=new WebsiteSession(store,vault,{
+    authorizationReference:'fixture-only',
+    authorizeInteractively:async()=>({handle:'fixture',opaqueGrant:'local-test',expiresAt:initial+600_000}),
+    async search(){return new Response(new ReadableStream<Uint8Array>({pull(){entered();}}));},
+  },()=>initial);
+  try{
+    await account.connect(signal);
+    const collection=account.collect([],initial,controller.signal,()=>assert.fail('Aborted page was committed'));
+    await started;
+    controller.abort();
+    assert.equal(await collection,false);
+    assert.equal(account.state.status,'Connected');
+    assert.equal(store.count("SELECT count(*) n FROM settings WHERE key LIKE 'website:cursor:%'"),0);
+  }finally{store.close();}
+});

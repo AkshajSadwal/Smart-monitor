@@ -359,11 +359,12 @@ export function createApi(monitor:Monitor,options:{
       const browser=row.id==='session'?browserState:undefined;
       const session=row.id==='session'?options.website?.state:undefined;
       const status=monitor.status;
+      const supported=session?.status!=='Unsupported';
       const postCount=store.count(`SELECT count(*) n FROM post_sources s JOIN posts p ON p.namespace=s.namespace AND p.id=s.post_id
         WHERE s.collector=? AND (?<>'session' OR (p.observation NOT LIKE 'user-shared:%' AND p.observation NOT LIKE 'manual:%'))`,row.id,row.id);
       return {
-        id:row.id,active:!!row.active,configured:!!row.configured,status:session?.status??row.status,error:row.error_code,
-        lastSuccess:row.last_success_at,nextDue:row.active?status.nextDue:null,postCount,gap:row.gap,coverage:store.coverage(row.id),capabilities:[...(monitor.sources.get(row.id)?.capabilities??[])],
+        id:row.id,active:!!row.active,configured:supported&&!!row.configured,status:session?.status??row.status,error:supported?row.error_code:null,
+        lastSuccess:row.last_success_at,nextDue:row.active&&supported?status.nextDue:null,postCount,gap:row.gap,coverage:store.coverage(row.id),capabilities:[...(monitor.sources.get(row.id)?.capabilities??[])],
         ...(browser?{browser:{...browser,available:!!options.browserAccount},account:session?.handle??(browser.status==='Connected'?browser.handle:null),manualPosts:store.count("SELECT count(*) n FROM post_sources WHERE collector='manual'")}:{}),
       };
     });
@@ -377,6 +378,7 @@ export function createApi(monitor:Monitor,options:{
   });
   api.put('/api/v1/sources/:id/active',async req=>{
     const {id}=choice.parse(req.params);
+    if(id==='session'&&options.website?.state.status==='Unsupported')throw new ApiError(409,'SOURCE_NOT_READY','An authorized X collection interface is not available.');
     if (id===store.active.id) return monitor.status;
     if(!store.sources.find(s=>s.id===id)?.configured||!monitor.sources.get(id))throw new ApiError(409,'SOURCE_NOT_READY','Configure and authorize this source before selecting it.');
     monitor.invalidate();

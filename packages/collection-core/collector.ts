@@ -14,6 +14,9 @@ export type CommitPage = (posts:Candidate[],historical:boolean,key:string,state:
 export interface Collector {
   readonly id:CollectorId;
   readonly capabilities:readonly string[];
+  // Earliest safe upstream access; Infinity means authorization is unavailable.
+  readonly nextAllowedAt?:number;
+  readonly availabilityStatus?:string;
   collect(lists:Watchlist[],now:number,signal:AbortSignal,commit:CommitPage):Promise<boolean>;
   lookup?(posts:Candidate[],now:number,signal:AbortSignal,attempts?:Map<string,number>):Promise<{posts:Candidate[];removed:string[]}>;
   refreshSignals?(now:number,signal:AbortSignal):Promise<void>;
